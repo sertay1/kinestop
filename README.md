@@ -31,7 +31,7 @@
 * **Visual Customization:** 12 color themes, 6 placement patterns, dot size, and opacity options.
 * **Adjustable Sensitivity:** 10 sensitivity levels (0.2x - 6.0x) with hand tremor smoothing.
 * **Zero Calibration:** Lock your current holding angle as the center horizon with one click.
-* **Language Support:** Full English and Turkish language support.
+* **Language Support:** English and Turkish language support.
 
 <div align="center">
   <img src="assets/KinestopEN.png" alt="Kinestop Screenshot" width="1000">
