@@ -1,6 +1,6 @@
 #---------------------------------------------------------------------------------
 # Kinestop host unit tests. Modification of the original Kinestop by SertAy
-# (https://github.com/sertay1/Kinestop): tests for the sysmodule/overlay split.
+# (https://github.com/sertay1/Kinestop).
 #
 #   make -C tests          build and run every test (non-zero exit on failure)
 #   make -C tests bins     build only
@@ -8,20 +8,18 @@
 #
 # Uses the host compiler only; no devkitPro needed. The code under test is the
 # real common/config.cpp, common/dots.cpp and the header-only
-# sysmodule/source/{swizzle,raster,bounded_dequeue,log_ring,frame_scale}.hpp.
+# overlay/source/{swizzle,raster,frame_scale,hud_frame}.hpp.
 #---------------------------------------------------------------------------------
 
 HOSTCXX  ?= g++
-HOSTCC   ?= gcc
 
 ROOT     := ..
 BUILD    := build
 
-CPPFLAGS := -I$(ROOT)/common -I$(ROOT)/sysmodule/source -MMD -MP
+CPPFLAGS := -I$(ROOT)/common -I$(ROOT)/overlay/source -MMD -MP
 CXXFLAGS := -std=c++20 -Wall -Wextra -O1 -g
-CFLAGS   := -std=c11 -Wall -Wextra -O1 -g
 
-TESTS    := test_swizzle test_dots test_config test_ipc test_raster test_dequeue test_log_ring test_scale
+TESTS    := test_swizzle test_dots test_config test_raster test_scale test_hud
 BINS     := $(addprefix $(BUILD)/,$(TESTS))
 
 COMMON_OBJS := $(BUILD)/config.o $(BUILD)/dots.o
@@ -34,10 +32,7 @@ bins: $(BINS)
 
 run: $(BINS)
 	@failed=0; \
-	for t in $(TESTS); do \
-		if [ "$$t" = test_ipc ]; then ./$(BUILD)/$$t $(ROOT) || failed=1; \
-		else ./$(BUILD)/$$t || failed=1; fi; \
-	done; \
+	for t in $(TESTS); do ./$(BUILD)/$$t || failed=1; done; \
 	if [ $$failed -ne 0 ]; then echo "host tests: FAILED"; exit 1; fi; \
 	echo "host tests: all passed"
 
@@ -50,19 +45,10 @@ $(BUILD)/%.o: $(ROOT)/common/%.cpp | $(BUILD)
 $(BUILD)/%.o: %.cpp | $(BUILD)
 	$(HOSTCXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/%.o: %.c | $(BUILD)
-	$(HOSTCC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
-
 $(BUILD)/test_swizzle: $(BUILD)/test_swizzle.o
 	$(HOSTCXX) $^ -o $@
 
 $(BUILD)/test_raster: $(BUILD)/test_raster.o
-	$(HOSTCXX) $^ -o $@
-
-$(BUILD)/test_dequeue: $(BUILD)/test_dequeue.o
-	$(HOSTCXX) $^ -o $@
-
-$(BUILD)/test_log_ring: $(BUILD)/test_log_ring.o
 	$(HOSTCXX) $^ -o $@
 
 $(BUILD)/test_scale: $(BUILD)/test_scale.o $(COMMON_OBJS)
@@ -74,7 +60,7 @@ $(BUILD)/test_dots: $(BUILD)/test_dots.o $(COMMON_OBJS)
 $(BUILD)/test_config: $(BUILD)/test_config.o $(COMMON_OBJS)
 	$(HOSTCXX) $^ -o $@
 
-$(BUILD)/test_ipc: $(BUILD)/test_ipc.o $(BUILD)/ipc_c_sizes.o
+$(BUILD)/test_hud: $(BUILD)/test_hud.o $(COMMON_OBJS)
 	$(HOSTCXX) $^ -o $@
 
 clean:

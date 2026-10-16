@@ -1,10 +1,10 @@
 // Kinestop configuration (config.ini) load/save.
 //
 // Original Kinestop by SertAy (https://github.com/sertay1/Kinestop).
-// This stdio rewrite of the original ifstream-based parser is part of the
-// sysmodule/overlay split, a modification of the original project: the
-// sysmodule links this file too, and iostreams/std::string would cost it far
-// more memory than the parser itself.
+// This stdio rewrite of the original ifstream-based parser is part of a
+// modified version of the original project: iostreams would cost the overlay
+// far more memory than the parser itself, and it must fit Ultrahand's
+// default 4 MB overlay heap.
 
 #include "config.hpp"
 
@@ -114,7 +114,7 @@ void Config::set_defaults() {
     general.enabled = true;
     general.poll_rate_hz = 60;
     general.language = 0; // 0: English, 1: Türkçe
-    general.debug_flags = 0;
+    general.console_sensor = false;
 
     visual.style = 0;
     visual.color = 0;
@@ -138,10 +138,6 @@ void Config::set_defaults() {
 void Config::sanitize() {
     general.poll_rate_hz = clampi(general.poll_rate_hz, 10, 120);
     general.language = clampi(general.language, 0, 1);
-    // KINESTOP_DEBUG_ALL: unknown bits are dropped rather than clamped (each bit is its own
-    // switch); a negative value is treated as "none", not as "all bits".
-    general.debug_flags = general.debug_flags < 0 ? 0
-        : general.debug_flags & (int)KINESTOP_DEBUG_ALL;
 
     // Unknown styles fall back to Perimeter (0), as the original
     // get_anchors() did with `default: case 0:`.
@@ -208,14 +204,15 @@ bool Config::load(const char* filepath) {
         const char* val = trim(eq + 1);
         to_lower(key);
 
-        // Unknown keys (including legacy ones such as draw_center_reticle and
-        // draw_roll_indicators) are ignored silently.
+        // Unknown keys (including legacy ones such as draw_center_reticle,
+        // draw_roll_indicators and the 2.0.0 test builds' debug_flags) are
+        // ignored silently.
         switch (section) {
             case General:
                 if (!std::strcmp(key, "enabled")) general.enabled = parse_bool(val, general.enabled);
                 else if (!std::strcmp(key, "poll_rate_hz")) general.poll_rate_hz = parse_int(val, general.poll_rate_hz);
                 else if (!std::strcmp(key, "language")) general.language = parse_int(val, general.language);
-                else if (!std::strcmp(key, "debug_flags")) general.debug_flags = parse_int(val, general.debug_flags);
+                else if (!std::strcmp(key, "console_sensor")) general.console_sensor = parse_bool(val, general.console_sensor);
                 break;
             case Visual:
                 if (!std::strcmp(key, "style")) visual.style = parse_int(val, visual.style);
@@ -271,7 +268,7 @@ bool Config::save(const char* filepath) const {
     std::fprintf(file, "enabled = %s\n", bool_str(general.enabled));
     std::fprintf(file, "poll_rate_hz = %d\n", general.poll_rate_hz);
     std::fprintf(file, "language = %d\n", general.language);
-    std::fprintf(file, "debug_flags = %d\n\n", general.debug_flags);
+    std::fprintf(file, "console_sensor = %s\n\n", bool_str(general.console_sensor));
 
     std::fprintf(file, "[visual]\n");
     std::fprintf(file, "style = %d\n", visual.style);
@@ -297,56 +294,6 @@ bool Config::save(const char* filepath) const {
     bool ok = !std::ferror(file);
     if (std::fclose(file) != 0) ok = false;
     return ok;
-}
-
-void Config::to_wire(KinestopWireConfig& out) const {
-    Config c = *this;
-    c.sanitize();
-
-    std::memset(&out, 0, sizeof(out));
-    out.style = (uint8_t)c.visual.style;
-    out.color = (uint8_t)c.visual.color;
-    out.density = (uint8_t)c.visual.density;
-    out.dot_size = (uint8_t)c.visual.line_thickness;
-    out.free_floating = c.visual.free_floating ? 1 : 0;
-    out.invert_pitch = c.calibration.invert_pitch ? 1 : 0;
-    out.invert_roll = c.calibration.invert_roll ? 1 : 0;
-    out.show_in_captures = c.visual.show_in_captures ? 1 : 0;
-    out.poll_rate_hz = (uint16_t)c.general.poll_rate_hz;
-    out.debug_flags = (uint8_t)c.general.debug_flags;
-    out.opacity = c.visual.opacity;
-    out.filter_alpha = c.filter.alpha;
-    out.deadzone_deg = c.filter.deadzone_deg;
-    out.pitch_offset = c.calibration.pitch_offset;
-    out.roll_offset = c.calibration.roll_offset;
-    out.sensitivity_pitch = c.calibration.sensitivity_pitch;
-    out.sensitivity_roll = c.calibration.sensitivity_roll;
-}
-
-void Config::from_wire(const KinestopWireConfig& in) {
-    visual.style = in.style;
-    visual.color = in.color;
-    visual.density = in.density;
-    visual.line_thickness = in.dot_size;
-    visual.free_floating = in.free_floating != 0;
-    visual.show_in_captures = in.show_in_captures != 0;
-    visual.opacity = in.opacity;
-
-    filter.alpha = in.filter_alpha;
-    filter.deadzone_deg = in.deadzone_deg;
-
-    calibration.pitch_offset = in.pitch_offset;
-    calibration.roll_offset = in.roll_offset;
-    calibration.invert_pitch = in.invert_pitch != 0;
-    calibration.invert_roll = in.invert_roll != 0;
-    calibration.sensitivity_pitch = in.sensitivity_pitch;
-    calibration.sensitivity_roll = in.sensitivity_roll;
-
-    // The only general.* fields carried on the wire.
-    general.poll_rate_hz = in.poll_rate_hz;
-    general.debug_flags = in.debug_flags;
-
-    sanitize();
 }
 
 } // namespace kinestop

@@ -1,12 +1,12 @@
-// Kinestop sysmodule - logical (1280x720) px to framebuffer px for the dot
-// frame: dot centres, the quantized shared offset and the dot core/ring
-// sizes, for each framebuffer size (LayerMode).
+// Kinestop HUD - logical (1280x720) px to framebuffer px for the dot frame:
+// dot centres, the quantized shared offset and the dot core/ring sizes, for
+// a framebuffer of any width (the HUD uses 640x360).
 //
-// Original Kinestop by SertAy (https://github.com/sertay1/Kinestop). The
-// sysmodule/overlay split is a modification of the original project.
+// Original Kinestop by SertAy (https://github.com/sertay1/Kinestop). This
+// file is part of a modified version of the original project.
 //
 // Header-only and free of libnx so the host tests (tests/test_scale.cpp)
-// can check it; main.cpp's build_frame() uses it.
+// can check it; hud_frame.hpp uses it.
 
 #pragma once
 
@@ -21,7 +21,7 @@ constexpr float LOGICAL_WIDTH = 1280.0f;  // dots::LOGICAL_WIDTH
 constexpr float OFFSET_QUANTUM = 4.0f;
 
 // Smallest dot core and ring, in framebuffer px. At fb_scale 0.5 the
-// smallest size already maps to 0.5 px; at 0.25 (Quarter2x) the two
+// smallest size already maps to 0.5 px; at 0.25 (a 320x180 framebuffer) the two
 // smallest sizes would otherwise shrink to sub-half-pixel smudges.
 constexpr float MIN_CORE_RADIUS_FB = 0.5f;
 constexpr float MIN_RING_WIDTH_FB = 1.0f;
@@ -32,7 +32,7 @@ inline float fb_scale_for(uint32_t fb_width) {
     return (float)fb_width / LOGICAL_WIDTH;
 }
 
-// Logical offset -> quantized framebuffer steps (the FrameKey), and back.
+// Logical offset -> quantized framebuffer steps, and back.
 inline int32_t quantize_offset(float logical, float fb_scale) {
     return (int32_t)std::lround(logical * fb_scale * OFFSET_QUANTUM);
 }

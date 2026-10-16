@@ -1,19 +1,27 @@
 /*
- * Kinestop overlay - settings / control panel (by SertAy).
+ * Kinestop overlay (by SertAy).
  *
  * This is a modification of the original Kinestop by SertAy
- * (https://github.com/sertay1/Kinestop): the motion-cue dots are now drawn by
- * a background sysmodule (title 4200000000001042, service "kinestop"), so
- * this overlay is a normal 448px Tesla/Ultrahand panel that starts/stops the
- * sysmodule, edits config.ini and pushes live settings to it over IPC. It no
- * longer draws dots or touches the IMU, fits in the default 4MB overlay
- * memory, and other overlays keep working while the dots are shown.
+ * (https://github.com/sertay1/Kinestop), optimized to run in Ultrahand's
+ * default 4 MB overlay memory. kinestop.ovl runs in one of two modes, picked
+ * by its launch arguments in main() (the same relaunch-per-mode pattern
+ * Status Monitor uses):
+ *
+ *   SETTINGS (default): the normal 448x720 settings panel. Leaving it (B, or
+ *     a hide: menu combo, HOME, power) with the dots enabled relaunches
+ *     kinestop.ovl in HUD mode; B with the dots disabled goes back to the
+ *     Ultrahand menu.
+ *   HUD ("-hud"): a 640x360 framebuffer that VI scales up to a full-screen
+ *     layer (Kinestop patch in libtesla). It draws only the dots, gives every
+ *     button to the game and is never hidden; the menu combo relaunches
+ *     kinestop.ovl in SETTINGS mode.
+ *
+ * The original kept a 1280x720 framebuffer and needed 8 MB of overlay memory.
  */
 
 #define TESLA_INIT_IMPL
 #include <tesla.hpp>
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -21,26 +29,29 @@
 #include <mutex>
 #include <string>
 #include <vector>
-#include <sys/stat.h>
 
 #include "config.hpp"
 #include "dots.hpp"
-#include "kinestop_ipc.h"
-#include "ipc_client.hpp"
+#include "filter.hpp"
+#include "hud_frame.hpp"
+#include "sensor.hpp"
 
 namespace {
     namespace dots = kinestop::dots;
-    namespace ipc  = kinestop::ipc;
+
+    constexpr const char* HudModeLabel = "Motion Dots";  // its name in Ultrahand's "Launch modes"
+    constexpr u16 HudFramebufferWidth  = 640;           // scaled 2x (handheld) / 3x (docked) to full screen
+    constexpr u16 HudFramebufferHeight = 360;
 
     kinestop::Config g_config;
+    bool g_hudMode = false;
+    std::string g_selfName = "kinestop.ovl";  // our file name in /switch/.overlays (argv[0])
     bool g_needGuiReload = false;
 
-    constexpr const char* BootFlagDir  = "sdmc:/atmosphere/contents/" KINESTOP_PROGRAM_ID_STR "/flags";
-    constexpr const char* BootFlagPath = "sdmc:/atmosphere/contents/" KINESTOP_PROGRAM_ID_STR "/flags/boot2.flag";
-
-    constexpr u64 StatusRefreshNs = 1000000000ULL;  // status line refresh period
-    constexpr u64 SaveDebounceNs  =  500000000ULL;  // coalesce trackbar drags into one ini write
-    constexpr u64 NoticeNs        = 3000000000ULL;  // transient notice duration
+    constexpr u64 SaveDebounceNs   =  500000000ULL;  // coalesce trackbar drags into one ini write
+    constexpr u64 NoticeNs         = 3000000000ULL;  // transient notice duration
+    constexpr u64 SensorRetryNs    = 1000000000ULL;  // retry starting sensors that failed to start
+    constexpr u64 SensorFreshNs    =  500000000ULL;  // orientation counts as current this long after a sample
 
     // Proper 4-bit RGBA4444 color constructor (0..15 per channel)
     inline constexpr tsl::Color make_color(u8 r, u8 g, u8 b, u8 a = 255) {
@@ -55,7 +66,6 @@ namespace {
     constexpr tsl::Color ColorOk    = make_color(80, 240, 120);
     constexpr tsl::Color ColorWarn  = make_color(255, 210, 60);
     constexpr tsl::Color ColorError = make_color(255, 90, 100);
-    constexpr tsl::Color ColorIdle  = make_color(170, 180, 195);
 
     inline bool is_tr() {
         return g_config.general.language == 1;
@@ -65,34 +75,107 @@ namespace {
         return armTicksToNs(armGetSystemTick());
     }
 
-    bool file_exists(const char* path) {
-        struct stat st;
-        return stat(path, &st) == 0;
+    // ---------------------------------------------------------------------
+    // MODE SWITCHING
+    // Each mode is its own launch of kinestop.ovl: the next launch is queued
+    // with setNextOverlay() and this process exits.
+    // ---------------------------------------------------------------------
+    void queue_relaunch(bool hud) {
+        // A mode switch is not an exit: no exit rumble/sound on the way out,
+        // and the HUD comes up silently.
+        skipClosingExitFeedback = true;
+        tsl::setNextOverlay(ult::OVERLAY_PATH + g_selfName, hud ? std::string(kinestop::hud::HUD_ARG) + " --silentLaunch" : "");
     }
 
-    // KINESTOP_DEBUG_NO_SUSPEND (coexistence test): the overlay never takes
-    // the dots down for its panel or for the Ultrahand menu.
-    inline bool no_suspend_test() {
-        return (g_config.general.debug_flags & (int)KINESTOP_DEBUG_NO_SUSPEND) != 0;
+    // From the main (UI) thread.
+    void relaunch(bool hud) {
+        queue_relaunch(hud);
+        tsl::Overlay::get()->close(true);
     }
 
-    // Name of the layer the sysmodule builds for the current debug_flags
-    // (UNSCALED_LAYER wins over SCALED_SMALL, see kinestop_ipc.h).
-    const char* layer_mode_name() {
-        const bool tr = g_config.general.language == 1;
-        const int dbg = g_config.general.debug_flags;
-        if (dbg & (int)KINESTOP_DEBUG_UNSCALED_LAYER)
-            return tr ? "Çeyrek 1x (640x360)" : "Quarter 1x (640x360)";
-        if (dbg & (int)KINESTOP_DEBUG_SCALED_SMALL)
-            return tr ? "Çeyrek 2x (320x180)" : "Quarter 2x (320x180)";
-        return tr ? "Tam ekran 2x (640x360)" : "Full screen 2x (640x360)";
+    // Closes Kinestop into the Ultrahand menu, also when this session was
+    // started by a key combo (which clears Ultrahand's in_overlay flag): the
+    // same in_overlay + --skipCombo return libtesla does for combo returns.
+    void open_ultrahand_menu() {
+        ult::setIniFileValue(ult::ULTRAHAND_CONFIG_INI_PATH, ult::ULTRAHAND_PROJECT_NAME, ult::IN_OVERLAY_STR, ult::TRUE_STR);
+        tsl::setNextOverlay(returnOverlayPath, "--skipCombo");
+        tsl::Overlay::get()->close(true);
     }
 
     // ---------------------------------------------------------------------
-    // CONFIG PERSISTENCE
-    // The overlay is the only writer of config.ini. Trackbar drags fire one
-    // change per step, so writes are debounced; lifecycle-relevant changes
-    // (master toggle, language, resets, calibration) are written at once.
+    // SENSOR
+    // Sampled on the main thread once per frame. libtesla's background poller
+    // restarts HID on the power button (hidExit + hidInitialize, Kinestop
+    // patch hook): the sensor is shut down before that (a registered
+    // SevenSixAxis buffer makes libnx abort in hidExit) and started again
+    // after, under g_sensorMutex. In between (g_hidDown) a sensor_start()
+    // only records the request; the mutex is not held across the restart
+    // because the poller takes libtesla's input mutex inside it, while the
+    // main thread calls sensor_start() from handleInput() under that mutex.
+    // ---------------------------------------------------------------------
+    std::mutex                  g_sensorMutex;
+    kinestop::SensorManager     g_sensor;
+    bool                        g_sensorWanted = false;  // between sensor_start() and sensor_stop()
+    bool                        g_sensorSeven  = false;  // console sensor (SevenSixAxis) requested
+    bool                        g_hidDown      = false;  // libtesla is restarting HID
+    kinestop::ComplementaryFilter g_filter;
+    kinestop::Orientation       g_orientation;           // raw filtered orientation (calibration not applied)
+    u64                         g_lastSampleTick = 0;    // 0 = no sample yet
+    u64                         g_nextRetryTick  = 0;
+
+    // Returns the SevenSixAxis Result (0 when it runs or was not requested).
+    Result sensor_start(bool seven) {
+        std::lock_guard lock(g_sensorMutex);
+        g_sensor.exit();
+        g_sensorWanted = true;
+        g_sensorSeven  = seven;
+        if (!g_hidDown)
+            g_sensor.init(seven);
+        return g_sensor.seven_rc();
+    }
+
+    void sensor_stop() {
+        std::lock_guard lock(g_sensorMutex);
+        g_sensorWanted = false;
+        g_sensor.exit();
+    }
+
+    // tsl::hidReinitHook, on the background poller thread.
+    void on_hid_reinit(bool reinitialized) {
+        std::lock_guard lock(g_sensorMutex);
+        g_hidDown = !reinitialized;
+        if (!reinitialized)
+            g_sensor.exit();
+        else if (g_sensorWanted)
+            g_sensor.init(g_sensorSeven);  // checks that hid came back
+    }
+
+    void sensor_tick() {
+        std::lock_guard lock(g_sensorMutex);
+        const u64 now = armGetSystemTick();
+        if (now >= g_nextRetryTick) {
+            g_nextRetryTick = now + armNsToTicks(SensorRetryNs);
+            g_sensor.retry_start();
+        }
+
+        kinestop::SensorSample smp;
+        if (!g_sensor.sample(smp))
+            return;
+        // dt since the previous fresh sample, so gyro integration covers
+        // frames without one (clamped inside update()).
+        const float dt = g_lastSampleTick != 0 ? (float)armTicksToNs(now - g_lastSampleTick) / 1e9f : 0.0f;
+        g_orientation = g_filter.update(smp.accel, smp.gyro, dt, g_config);
+        g_lastSampleTick = now;
+    }
+
+    bool sensor_fresh() {
+        return g_lastSampleTick != 0 && armTicksToNs(armGetSystemTick() - g_lastSampleTick) < SensorFreshNs;
+    }
+
+    // ---------------------------------------------------------------------
+    // CONFIG PERSISTENCE (settings mode)
+    // Trackbar drags fire one change per step, so writes are debounced;
+    // toggles, language, resets and calibration are written at once.
     // ---------------------------------------------------------------------
     bool g_saveDirty   = false;
     u64  g_saveDirtyNs = 0;
@@ -106,466 +189,68 @@ namespace {
         if (g_saveDirty) save_config_now();
     }
 
-    void mark_config_dirty() {
+    void apply_setting() {
+        g_config.sanitize();
         g_saveDirty   = true;
         g_saveDirtyNs = now_ns();
     }
 
-    // ---------------------------------------------------------------------
-    // SYSMODULE LIFECYCLE WORKER
-    // pmshellLaunchProgram + waiting for the service (up to ~1.5s) and the
-    // graceful-exit wait would freeze the panel, so start/stop run on a
-    // short-lived thread. While it runs, the UI thread makes no IPC calls
-    // (ipc_client is not thread-safe); pushes are redone when it finishes.
-    //
-    // g_ctlMutex serialises everything that touches ipc_client or the
-    // worker handle between the UI thread and Ultrahand's background event
-    // thread, which calls Overlay::hide() -> onHide() itself (launch combo
-    // while open, HOME, power). Recursive: the helpers below nest. The
-    // worker thread never takes it, so joining under it cannot deadlock.
-    // ---------------------------------------------------------------------
-    std::recursive_mutex g_ctlMutex;
-    using CtlLock = std::lock_guard<std::recursive_mutex>;
-
-    enum class Job : u8 { None, Start, Stop };
-
-    Thread            g_worker{};
-    std::atomic<bool> g_workerActive{false};
-    Job               g_job          = Job::None;
-    Result            g_jobRc        = 0;
-    bool              g_jobNoSuspend = false;  // no_suspend_test() when the job was queued
-    std::atomic<bool> g_jobDone{false};
-
-    Job    g_lastJob   = Job::None;  // outcome shown in the status line
-    Result g_lastJobRc = 0;
-
-    // True between onShow and onHide. Read by the worker, which suspends a
-    // freshly started sysmodule while the panel is still on screen.
-    std::atomic<bool> g_panelVisible{false};
-
-    // initServices() already suspended the dots (and timed it) right before
-    // the panel's layer was created: the first onShow() need not repeat it.
-    bool g_suspendedAtInit = false;
-
-    void worker_main(void*) {
-        if (g_job == Job::Start) {
-            g_jobRc = ipc::start();
-            // The new process starts unsuspended and puts its layer up next
-            // to this panel's: take it down again at once. onHide joins the
-            // worker before resuming, so this cannot outlive the panel.
-            if (R_SUCCEEDED(g_jobRc) && !g_jobNoSuspend && g_panelVisible.load(std::memory_order_acquire))
-                ipc::setSuspended(true);
-        } else {
-            g_jobRc = ipc::stop();
-        }
-        g_jobDone.store(true, std::memory_order_release);
-    }
-
-    inline bool worker_busy() {
-        return g_workerActive;
-    }
-
-    void join_worker() {
-        if (!g_workerActive) return;
-        threadWaitForExit(&g_worker);
-        threadClose(&g_worker);
-        g_workerActive = false;
-    }
-
-    // ---------------------------------------------------------------------
-    // STATUS LINE
-    // ---------------------------------------------------------------------
-    std::string g_statusStr;
-    tsl::Color  g_statusColor = ColorIdle;
-    bool        g_statusRunning = false;   // last known process state
-    bool        g_installed     = false;
-    bool        g_installedKnown = false;
-
+    // Transient notice next to "by SertAy".
     std::string g_noticeStr;
-    tsl::Color  g_noticeColor = ColorIdle;
+    tsl::Color  g_noticeColor = ColorOk;
     u64         g_noticeUntilNs = 0;
-
-    u64  g_lastRefreshNs = 0;
-    bool g_refreshNow    = true;
-
-    // Diagnostics block (test builds): re-formatted on each status refresh
-    // (~1 Hz), drawn as-is every frame.
-    constexpr int DiagMaxLines   = 7;
-    constexpr u16 DiagLineStep   = 17;
-    constexpr u32 DiagFontSize   = 14;
-    constexpr u16 DiagBlockHeight = DiagMaxLines * DiagLineStep + 12;
-
-    std::string g_diagLines[DiagMaxLines];
-    tsl::Color  g_diagColors[DiagMaxLines] = {};
-    int         g_diagCount = 0;
-
-    // Previous snapshot, to show whether the counters move between refreshes.
-    bool g_diagPrevValid    = false;
-    u32  g_diagPrevLoop     = 0;
-    u32  g_diagPrevFrames   = 0;
-    u32  g_diagPrevTimeouts = 0;
-
-    // How long the sysmodule took to report its layer down after the last
-    // SetSuspended(true) sent on show: >= 0 ms, SuspendAckTimeout, or
-    // SuspendAckNone when no suspend was waited for.
-    constexpr s32 SuspendAckNone    = -2;
-    constexpr s32 SuspendAckTimeout = -1;
-    s32 g_suspendAckMs = SuspendAckNone;
-
-    constexpr u64 SuspendWaitNs = 300000000ULL;  // max wait for the layer to go down
-    constexpr u64 SuspendPollNs =  10000000ULL;
-
-    // Results are shown the way HOS error screens and the sysmodule log
-    // (sdmc:/config/kinestop/sysmodule.log) print them: 2xxx-yyyy.
-    #define KS_RC_FMT "%04u-%04u"
-    #define KS_RC_ARGS(rc) (unsigned)(2000 + R_MODULE(rc)), (unsigned)R_DESCRIPTION(rc)
-
-    void format_into(std::string& out, const char* fmt, va_list args) {
-        char buf[96];
-        std::vsnprintf(buf, sizeof(buf), fmt, args);
-        if (out != buf) out = buf;
-    }
-
-    __attribute__((format(printf, 2, 3)))
-    void set_status(const tsl::Color& color, const char* fmt, ...) {
-        va_list args;
-        va_start(args, fmt);
-        format_into(g_statusStr, fmt, args);
-        va_end(args);
-        g_statusColor = color;
-    }
 
     __attribute__((format(printf, 2, 3)))
     void show_notice(const tsl::Color& color, const char* fmt, ...) {
+        char buf[96];
         va_list args;
         va_start(args, fmt);
-        format_into(g_noticeStr, fmt, args);
+        std::vsnprintf(buf, sizeof(buf), fmt, args);
         va_end(args);
+        g_noticeStr     = buf;
         g_noticeColor   = color;
         g_noticeUntilNs = now_ns() + NoticeNs;
     }
 
-    __attribute__((format(printf, 2, 3)))
-    void add_diag_line(const tsl::Color& color, const char* fmt, ...) {
-        if (g_diagCount >= DiagMaxLines) return;
-        va_list args;
-        va_start(args, fmt);
-        format_into(g_diagLines[g_diagCount], fmt, args);
-        va_end(args);
-        g_diagColors[g_diagCount] = color;
-        ++g_diagCount;
-    }
-
-    const char* sensor_name(u32 source) {
-        switch (source) {
-            case KinestopSensor_SevenSixAxis: return "SevenSixAxis";
-            case KinestopSensor_NpadSixAxis:  return "Npad";
-            default:                          return is_tr() ? "yok" : "none";
+    // Per-frame housekeeping of the settings Guis.
+    void tick_settings() {
+        sensor_tick();
+        const u64 now = now_ns();
+        if (g_saveDirty && now - g_saveDirtyNs >= SaveDebounceNs)
+            save_config_now();
+        if (g_noticeUntilNs != 0 && now >= g_noticeUntilNs) {
+            g_noticeUntilNs = 0;
+            g_noticeStr.clear();
         }
     }
 
-    // Rebuilds the diagnostics block from a fresh snapshot (nullptr: none).
-    void update_diagnostics(const KinestopStatus* st) {
-        const bool tr = is_tr();
-        g_diagCount = 0;
+    // (Re)starts the sensor for the "Console Motion Sensor" setting.
+    void apply_console_sensor() {
+        const Result rc = sensor_start(g_config.general.console_sensor);
+        if (R_FAILED(rc))
+            show_notice(ColorError, is_tr() ? "Konsol sensörü başlatılamadı: %04u-%04u" : "Console sensor failed: %04u-%04u",
+                        (unsigned)(2000 + R_MODULE(rc)), (unsigned)R_DESCRIPTION(rc));
+    }
 
-        // From the settings pushed to the sysmodule, so shown even without data.
-        add_diag_line(ColorIdle, tr ? "Katman: %s%s" : "Layer: %s%s", layer_mode_name(),
-                      no_suspend_test() ? (tr ? ", duraklatma yok" : ", no suspend") : "");
-
-        if (st == nullptr) {
-            g_diagPrevValid = false;
-            add_diag_line(ColorIdle, tr ? "Tanılama: veri yok" : "Diagnostics: no data");
+    // Lets Ultrahand assign a key combo to the HUD mode ("Launch modes" in
+    // the overlay's settings), as Status Monitor does. Written only when
+    // missing or different, so the SD card is not touched on every launch.
+    // overlays.ini itself is Ultrahand's: left alone when it does not exist.
+    void register_launch_modes() {
+        if (!ult::isFile(ult::OVERLAYS_INI_FILEPATH))
             return;
-        }
-
-        const bool prev = g_diagPrevValid;
-
-        // Sensor: which source and how far its sampling number moved in 1 s.
-        const bool sensorLive = st->sensor_source != KinestopSensor_None && st->sensor_advance_1s > 0;
-        add_diag_line(sensorLive ? ColorOk : ColorWarn,
-                      tr ? "Sensör: %s, +%u/sn" : "Sensor: %s, +%u/s",
-                      sensor_name(st->sensor_source), (unsigned)st->sensor_advance_1s);
-        if (st->seven_init_rc != 0)
-            add_diag_line(ColorWarn, tr ? "SevenSixAxis başlatılamadı: " KS_RC_FMT : "SevenSixAxis not started: " KS_RC_FMT,
-                          KS_RC_ARGS(st->seven_init_rc));
-
-        add_diag_line(ColorIdle, tr ? "Dikey %.1f  Yatay %.1f derece" : "Pitch %.1f  Roll %.1f deg",
-                      (double)st->pitch_deg, (double)st->roll_deg);
-
-        // Heartbeat: published at the top of every main-loop iteration, so a
-        // loop wedged in present() shows up as a counter that stops moving.
-        const u32 loopDelta   = st->loop_iterations - g_diagPrevLoop;
-        const u32 framesDelta = st->frames_presented - g_diagPrevFrames;
-        if (!prev) {
-            add_diag_line(ColorIdle, tr ? "Döngü %u | Kare %u" : "Loop %u | Frames %u",
-                          (unsigned)st->loop_iterations, (unsigned)st->frames_presented);
-        } else if (loopDelta == 0) {
-            add_diag_line(ColorError, tr ? "Döngü %u DURDU | Kare %u" : "Loop %u STALLED | Frames %u",
-                          (unsigned)st->loop_iterations, (unsigned)st->frames_presented);
-        } else {
-            add_diag_line(ColorOk, tr ? "Döngü %u (+%u) | Kare %u (+%u)" : "Loop %u (+%u) | Frames %u (+%u)",
-                          (unsigned)st->loop_iterations, (unsigned)loopDelta,
-                          (unsigned)st->frames_presented, (unsigned)framesDelta);
-        }
-
-        const bool newTimeouts = prev && st->dequeue_timeouts != g_diagPrevTimeouts;
-        add_diag_line(newTimeouts ? ColorWarn : ColorIdle,
-                      tr ? "Tampon zaman aşımı %u | Maks. sunum %u.%u ms" : "Dequeue timeouts %u | Max present %u.%u ms",
-                      (unsigned)st->dequeue_timeouts,
-                      (unsigned)(st->max_present_us / 1000), (unsigned)(st->max_present_us % 1000 / 100));
-
-        // Suspended state, plus how long the last suspend-on-show took.
-        const bool suspended = (st->flags & KINESTOP_STATUS_SUSPENDED) != 0;
-        char ack[32] = "";
-        if (g_suspendAckMs >= 0)
-            std::snprintf(ack, sizeof(ack), " (%d ms)", (int)g_suspendAckMs);
-        else if (g_suspendAckMs == SuspendAckTimeout)
-            std::snprintf(ack, sizeof(ack), "%s", tr ? " (onay yok)" : " (no ack)");
-        const bool expectSuspended = g_panelVisible.load(std::memory_order_relaxed) && !no_suspend_test();
-        add_diag_line((suspended != expectSuspended || g_suspendAckMs == SuspendAckTimeout) ? ColorWarn : ColorIdle,
-                      tr ? "Katman kurulumu %u | Askıda: %s%s" : "Layer inits %u | Suspended: %s%s",
-                      (unsigned)st->layer_inits,
-                      suspended ? (tr ? "evet" : "yes") : (tr ? "hayır" : "no"), ack);
-
-        g_diagPrevValid    = true;
-        g_diagPrevLoop     = st->loop_iterations;
-        g_diagPrevFrames   = st->frames_presented;
-        g_diagPrevTimeouts = st->dequeue_timeouts;
+        const std::string args   = std::string("(") + kinestop::hud::HUD_ARG + ")";
+        const std::string labels = std::string("(") + HudModeLabel + ")";
+        if (ult::parseValueFromIniSection(ult::OVERLAYS_INI_FILEPATH, g_selfName, "mode_args") != args)
+            ult::setIniFileValue(ult::OVERLAYS_INI_FILEPATH, g_selfName, "mode_args", args);
+        if (ult::parseValueFromIniSection(ult::OVERLAYS_INI_FILEPATH, g_selfName, "mode_labels") != labels)
+            ult::setIniFileValue(ult::OVERLAYS_INI_FILEPATH, g_selfName, "mode_labels", labels);
     }
 
-    const char* stage_name(u32 stage) {
-        switch (stage) {
-            case KinestopStage_ViInit:      return "VI init";
-            case KinestopStage_Display:     return "Display";
-            case KinestopStage_Layer:       return "Layer";
-            case KinestopStage_LayerStack:  return "Layer stack";
-            case KinestopStage_NWindow:     return "NWindow";
-            case KinestopStage_Framebuffer: return "Framebuffer";
-            case KinestopStage_Sensor:      return is_tr() ? "Sensör" : "Sensor";
-            default:                        return is_tr() ? "Bilinmeyen" : "Unknown";
-        }
-    }
-
-    void set_start_failed_status(Result rc) {
-        const bool tr = is_tr();
-        if (rc == ipc::ResultNotInstalled)
-            set_status(ColorError, tr ? "Yüklü değil" : "Not installed");
-        else if (rc == ipc::ResultTimeout)
-            set_status(ColorError, tr ? "Başlatılamadı: yanıt yok" : "Start failed: no response");
-        else if (rc == ipc::ResultExitedEarly)
-            set_status(ColorError, tr ? "Başlatılamadı: modül kapandı" : "Start failed: sysmodule exited");
-        else
-            set_status(ColorError, tr ? "Başlatılamadı: " KS_RC_FMT : "Start failed: " KS_RC_FMT, KS_RC_ARGS(rc));
-    }
-
-    // Rebuilds the status line; returns true when *st_out holds a fresh
-    // GetStatus snapshot.
-    bool refresh_status_line(KinestopStatus* st_out) {
-        const bool tr = is_tr();
-
-        if (worker_busy()) {
-            if (g_job == Job::Start)
-                set_status(ColorWarn, tr ? "Başlatılıyor..." : "Starting...");
-            else
-                set_status(ColorWarn, tr ? "Durduruluyor..." : "Stopping...");
-            return false;
-        }
-
-        const bool running = ipc::isRunning();
-        g_statusRunning = running;
-
-        if (!running) {
-            ipc::disconnect();
-            if (!g_installedKnown) {
-                g_installed      = ipc::isInstalled();
-                g_installedKnown = true;
-            }
-            if (!g_installed)
-                set_status(ColorError, tr ? "Yüklü değil" : "Not installed");
-            else if (g_lastJob == Job::Start && R_FAILED(g_lastJobRc))
-                set_start_failed_status(g_lastJobRc);
-            else
-                set_status(ColorIdle, tr ? "Durduruldu" : "Stopped");
-            return false;
-        }
-
-        if (g_lastJob == Job::Stop && R_FAILED(g_lastJobRc)) {
-            set_status(ColorError, tr ? "Durdurulamadı: " KS_RC_FMT : "Stop failed: " KS_RC_FMT, KS_RC_ARGS(g_lastJobRc));
-            return false;
-        }
-
-        if (!ipc::connect()) {
-            set_status(ColorWarn, tr ? "Çalışıyor - IPC yok" : "Running - no IPC");
-            return false;
-        }
-
-        if (!ipc::apiCompatible()) {
-            set_status(ColorError, tr ? "API uyumsuz (v%u, beklenen v%u)" : "API mismatch (v%u, need v%u)",
-                       ipc::remoteApiVersion(), (u32)KINESTOP_API_VERSION);
-            return false;
-        }
-
-        KinestopStatus& st = *st_out;
-        Result rc = ipc::getStatus(&st);
-        if (R_FAILED(rc) && ipc::connect())  // stale session (module restarted): retry once
-            rc = ipc::getStatus(&st);
-        if (R_FAILED(rc)) {
-            set_status(ColorError, tr ? "Hata: IPC " KS_RC_FMT : "Error: IPC " KS_RC_FMT, KS_RC_ARGS(rc));
-            return false;
-        }
-
-        if (st.last_error_rc != 0) {
-            set_status(ColorError, tr ? "Hata: %s " KS_RC_FMT : "Error: %s " KS_RC_FMT,
-                       stage_name(st.last_error_stage), KS_RC_ARGS(st.last_error_rc));
-        } else if (!(st.flags & KINESTOP_STATUS_SENSOR_OK)) {
-            set_status(ColorWarn, tr ? "Çalışıyor - sensör verisi yok" : "Running - no sensor data");
-        } else {
-            set_status(ColorOk, tr ? "Çalışıyor" : "Running");
-        }
-        return true;
-    }
-
-    // Queries the sysmodule and rebuilds the status line and the diagnostics
-    // block. A handful of cheap, fail-fast IPCs (pm:dmnt, sm HasService,
-    // GetStatus): called about once per second from update(), never per
-    // frame.
-    void refresh_status() {
-        CtlLock lock(g_ctlMutex);
-        g_lastRefreshNs = now_ns();
-        g_refreshNow    = false;
-
-        KinestopStatus st{};
-        const bool have = refresh_status_line(&st);
-        update_diagnostics(have ? &st : nullptr);
-
-        // Panel on screen but the layer is up (sysmodule started from
-        // elsewhere, or a lost SetSuspended): ask again. Not in the
-        // coexistence test, where the layer is meant to stay up.
-        if (have && g_panelVisible.load(std::memory_order_relaxed) && !no_suspend_test() &&
-            !(st.flags & KINESTOP_STATUS_SUSPENDED))
-            ipc::setSuspended(true);
-    }
-
-    // Pushes the current settings to a running sysmodule. Not persisted by
-    // the sysmodule; config.ini is written by the overlay.
-    void push_config() {
-        CtlLock lock(g_ctlMutex);
-        if (worker_busy()) return;  // re-pushed when the job finishes
-        KinestopWireConfig wire{};
-        g_config.to_wire(wire);     // carries debug_flags too
-        ipc::setConfig(wire);       // no-op (fail-fast) when not running
-    }
-
-    // Sends SetSuspended to a running sysmodule (fail-fast otherwise). With
-    // waitForLayerDown, polls its status for up to SuspendWaitNs until it
-    // reports the layer gone, so this panel's layer does not have to share
-    // the display with ours; the time it took is shown in the diagnostics.
-    // In the coexistence test (KINESTOP_DEBUG_NO_SUSPEND) every suspend
-    // request becomes a resume, so dots left suspended earlier come back.
-    void suspend_dots(bool suspend, bool waitForLayerDown) {
-        CtlLock lock(g_ctlMutex);
-        if (suspend && no_suspend_test()) {
-            suspend = false;
-            g_suspendAckMs = SuspendAckNone;
-        }
-        if (worker_busy() || !ipc::isRunning())
-            return;
-        if (R_FAILED(ipc::setSuspended(suspend)) || !suspend || !waitForLayerDown)
-            return;
-
-        const u64 start = now_ns();
-        for (;;) {
-            KinestopStatus st{};
-            if (R_FAILED(ipc::getStatus(&st)))
-                break;
-            const u64 elapsed = now_ns() - start;
-            if ((st.flags & KINESTOP_STATUS_SUSPENDED) && !(st.flags & KINESTOP_STATUS_LAYER_OK)) {
-                g_suspendAckMs = (s32)(elapsed / 1000000ULL);
-                return;
-            }
-            if (elapsed >= SuspendWaitNs)
-                break;
-            svcSleepThread(SuspendPollNs);
-        }
-        g_suspendAckMs = SuspendAckTimeout;
-    }
-
-    // Every setting except the master toggle goes through here.
-    void apply_setting() {
-        g_config.sanitize();
-        mark_config_dirty();
-        push_config();
-    }
-
-    void on_job_finished() {
-        CtlLock lock(g_ctlMutex);
-        join_worker();
-
-        g_lastJob   = g_job;
-        g_lastJobRc = g_jobRc;
-        g_installedKnown = false;
-
-        if (g_job == Job::Start) {
-            if (ipc::isRunning()) {
-                // Push in case settings changed while it was starting.
-                push_config();
-                // The worker suspended (or not) per the coexistence-test
-                // flag as it was when the job was queued; match the flag as
-                // it is now (suspend_dots turns this into a resume when the
-                // test is on).
-                if (g_panelVisible.load(std::memory_order_acquire))
-                    suspend_dots(true, false);
-            } else if (g_config.general.enabled) {
-                // Did not come up: don't leave "enabled" claiming otherwise.
-                g_config.general.enabled = false;
-                save_config_now();
-            }
-        }
-        g_refreshNow = true;
-    }
-
-    void start_job(Job job) {
-        CtlLock lock(g_ctlMutex);
-        if (g_workerActive) return;
-
-        g_job = job;
-        g_jobNoSuspend = no_suspend_test();
-        g_lastJob = Job::None;
-        g_lastJobRc = 0;
-        g_jobDone.store(false, std::memory_order_relaxed);
-
-        if (R_SUCCEEDED(threadCreate(&g_worker, worker_main, nullptr, nullptr, 0x8000, 0x2C, -2))) {
-            if (R_SUCCEEDED(threadStart(&g_worker))) {
-                g_workerActive = true;
-                refresh_status();  // shows "Starting..." / "Stopping..."
-                return;
-            }
-            threadClose(&g_worker);
-        }
-
-        // Could not spawn a thread: do it inline (the panel stalls briefly).
-        worker_main(nullptr);
-        on_job_finished();  // join_worker() is a no-op: no thread is active
-    }
-
-    // Static orange note lines under a list item. `en`/`tr` hold up to
-    // NoteMaxLines lines each (nullptr-terminated when shorter); the NoteText
-    // must outlive the list (static storage).
-    constexpr int NoteMaxLines = 6;
+    // Static orange note lines under a list item.
     constexpr s32 NoteLineStep = 20;
 
-    struct NoteText { const char* en[NoteMaxLines]; const char* tr[NoteMaxLines]; };
-
-    int note_line_count(const char* const* lines) {
-        int n = 0;
-        while (n < NoteMaxLines && lines[n] != nullptr) ++n;
-        return n;
-    }
-
-    void add_note(tsl::elm::List* list, const NoteText& text, bool tr) {
-        const char* const* lines = tr ? text.tr : text.en;
-        const int count = note_line_count(lines);
+    void add_note(tsl::elm::List* list, const char* const* lines, int count) {
         list->addItem(new tsl::elm::CustomDrawer([lines, count](tsl::gfx::Renderer *renderer, s32 x, s32 y, s32 w, s32 h) {
             const tsl::Color color = make_color(255, 170, 50);
             for (int i = 0; i < count; ++i)
@@ -573,25 +258,17 @@ namespace {
         }), (u16)(count * NoteLineStep + 12));
     }
 
-    // Per-frame housekeeping shared by every Gui. Cheap unless a refresh is
-    // due: an atomic load and a few tick comparisons.
-    void tick_background() {
-        CtlLock lock(g_ctlMutex);
-        if (g_workerActive && g_jobDone.load(std::memory_order_acquire))
-            on_job_finished();
-
-        const u64 now = now_ns();
-
-        if (g_saveDirty && now - g_saveDirtyNs >= SaveDebounceNs)
-            save_config_now();
-
-        if (g_noticeUntilNs != 0 && now >= g_noticeUntilNs) {
-            g_noticeUntilNs = 0;
-            g_noticeStr.clear();
-        }
-
-        if (g_refreshNow || now - g_lastRefreshNs >= StatusRefreshNs)
-            refresh_status();
+    // Draws the dots for the current orientation into libtesla's current
+    // framebuffer (cleared by the caller): same premultiplied RGBA4444,
+    // block-linear layout as libtesla's own drawing.
+    void draw_hud_dots(tsl::gfx::Renderer* renderer, const kinestop::hud::DotFrame& frame) {
+        const kinestop::raster::Surface surface{
+            static_cast<uint16_t*>(renderer->getCurrentFramebuffer()),
+            tsl::cfg::FramebufferWidth, tsl::cfg::FramebufferHeight};
+        if (surface.pixels == nullptr)
+            return;
+        kinestop::hud::draw_dots(surface, frame, dots::compute_offset(g_orientation, g_config),
+                                 g_config.visual.free_floating);
     }
 }
 
@@ -600,16 +277,70 @@ class GuiKinestopSettings;
 class GuiKinestopGuide;
 
 // -------------------------------------------------------------
+// IN-GAME FULL-SCREEN HUD (HUD mode)
+// -------------------------------------------------------------
+class KinestopHudElement : public tsl::elm::Element {
+private:
+    kinestop::hud::DotFrame m_frame;
+
+public:
+    KinestopHudElement() {
+        this->m_isItem = false;
+        kinestop::hud::build_dot_frame(g_config, tsl::cfg::FramebufferWidth, m_frame);
+    }
+
+    virtual void layout(u16 parentX, u16 parentY, u16 parentWidth, u16 parentHeight) override {
+        this->setBoundaries(0, 0, tsl::cfg::FramebufferWidth, tsl::cfg::FramebufferHeight);
+    }
+
+    virtual void draw(tsl::gfx::Renderer *renderer) override {
+        renderer->clearScreen();
+        if (g_config.general.enabled)
+            draw_hud_dots(renderer, m_frame);
+    }
+};
+
+class GuiKinestopHud : public tsl::Gui {
+public:
+    virtual tsl::elm::Element* createUI() override {
+        return new KinestopHudElement();
+    }
+
+    virtual void update() override {
+        // Launched with the dots turned off (Ultrahand's "Motion Dots"
+        // launch mode or its combo): open the settings instead.
+        if (!g_config.general.enabled) {
+            relaunch(false);
+            return;
+        }
+        sensor_tick();
+    }
+
+    virtual bool handleInput(u64 keysDown, u64 keysHeld, const HidTouchState &touchPos, HidAnalogStickState joyStickPosLeft, HidAnalogStickState joyStickPosRight) override {
+        // With tsl::disableHiding libtesla ignores the menu combo while we
+        // are shown: it opens the settings here instead. (Another overlay's
+        // combo still works: libtesla's poller launches it directly.)
+        const u64 combo = tsl::cfg::launchCombo;
+        if ((keysHeld & combo) == combo && (keysDown & combo)) {
+            relaunch(false);
+            return true;
+        }
+        // Everything else belongs to the game (also keeps B from closing us).
+        return true;
+    }
+};
+
+// -------------------------------------------------------------
 // STANDARD 448px SIDEBAR FRAME (by SertAy)
 // -------------------------------------------------------------
 class KinestopSidebarMenu : public tsl::elm::OverlayFrame {
 private:
-    bool m_showStatus;
+    bool m_showNotice;
     s32  m_subtitleWidth = -1;
 
 public:
-    KinestopSidebarMenu(const std::string& title, const std::string& subtitle, bool showStatus = false)
-        : tsl::elm::OverlayFrame(title, subtitle), m_showStatus(showStatus) {}
+    KinestopSidebarMenu(const std::string& title, const std::string& subtitle, bool showNotice = false)
+        : tsl::elm::OverlayFrame(title, subtitle), m_showNotice(showNotice) {}
 
     virtual void layout(u16 parentX, u16 parentY, u16 parentWidth, u16 parentHeight) override {
         this->setBoundaries(0, 0, 448, 720);
@@ -622,21 +353,16 @@ public:
     virtual void draw(tsl::gfx::Renderer *renderer) override {
         renderer->clearScreen();
 
-        // No dots here any more: the live preview is the sysmodule's real
-        // dots, visible next to this 448px panel.
         renderer->drawRect(0, 0, 448, 720, a(tsl::defaultBackgroundColor));
         renderer->drawString(m_title, false, 20, 50, 32, tsl::defaultOverlayColor);
         renderer->drawString(m_subtitle, false, 20, 75, 15, tsl::bannerVersionTextColor);
 
-        // Sysmodule status line, next to "by SertAy". Strings only change on
-        // refresh (~1 Hz), so nothing is formatted here.
-        if (m_showStatus) {
+        // Transient notice (calibration, sensor errors) next to "by SertAy".
+        if (m_showNotice && !g_noticeStr.empty()) {
             if (m_subtitleWidth < 0)
                 m_subtitleWidth = renderer->getTextDimensions(m_subtitle, false, 15).first;
             const s32 x = 20 + m_subtitleWidth + 18;
-            const bool notice = !g_noticeStr.empty();
-            renderer->drawString(notice ? g_noticeStr : g_statusStr, false, x, 75, 15,
-                                 notice ? g_noticeColor : g_statusColor, 448 - 15 - x);
+            renderer->drawString(g_noticeStr, false, x, 75, 15, g_noticeColor, 448 - 15 - x);
         }
 
         if (m_contentElement != nullptr) {
@@ -691,20 +417,25 @@ public:
         if (g_config.general.language == 1) {
             // ==================== TÜRKÇE REHBER ====================
             add_header("NASIL ÇALIŞIR?", make_color(80, 240, 120));
-            add_body("Noktaları bu menü değil, arka planda çalışan");
-            add_body("küçük bir sistem modülü (sysmodule) çizer.");
-            add_body("Menüyü gizleseniz de noktalar ekranda kalır;");
-            add_body("böylece Status Monitor gibi diğer overlay'leri");
-            add_body("aynı anda kullanabilirsiniz. Ultrahand'in");
-            add_body("varsayılan 4 MB overlay belleği yeterlidir.");
-            add_body("Bu panel açıkken noktalar duraklatılır;");
-            add_body("paneli açma kombinasyonuyla gizleyince");
-            add_body("yeniden görünürler. B ile çıkarsanız");
-            add_body("(Ultrahand menüsüne dönüş) duraklatılmış");
-            add_body("kalırlar, böylece menü görünür kalır");
-            add_body("(deneme sürümü). Geri getirmek için");
-            add_body("Kinestop'u tekrar açıp kombinasyonla");
-            add_body("gizleyin.");
+            add_body("Bu panelde ayarlar bulunur. B tuşu veya");
+            add_body("menü kombinasyonuyla çıktığınızda");
+            add_body("noktalar başlar: oyun oynarken ekranda");
+            add_body("görünürler ve tüm tuşlar oyunda kalır.");
+            add_body("Buraya dönmek için menü kombinasyonuna");
+            add_body("yeniden basın. Noktalar kapalıyken B,");
+            add_body("Ultrahand menüsüne döner.");
+            add_body("Aynı anda yalnızca bir Tesla overlay'i");
+            add_body("çalışabilir: başka bir overlay'i (veya");
+            add_body("Ultrahand menüsünü) açmak noktaları");
+            add_body("durdurur. Geri getirmek için Kinestop'u");
+            add_body("yeniden açıp B'ye basın. Noktalar");
+            add_body("açıkken Ultrahand menüsüne gitmek için");
+            add_body("Rehber ve Bakım altındaki Ultrahand");
+            add_body("Menüsü seçeneğini kullanın.");
+            add_body("Bu panel açıkken noktalar görünmez:");
+            add_body("değişiklikleri görmek için B'ye basın.");
+            add_body("Ultrahand'in varsayılan 4 MB overlay");
+            add_body("belleği yeterlidir.");
 
             add_header("GELİŞTİRİCİ VE BAĞIŞ LİNKLERİ", make_color(80, 200, 255));
             add_body("Geliştirici: SertAy");
@@ -717,8 +448,9 @@ public:
 
             add_header("BU SÜRÜM HAKKINDA", make_color(255, 210, 60));
             add_body("Bu sürüm, SertAy'ın orijinal Kinestop");
-            add_body("projesinin değiştirilmiş (sysmodule ayrımlı)");
-            add_body("bir sürümüdür. Orijinal proje:");
+            add_body("projesinin değiştirilmiş (4 MB overlay");
+            add_body("belleği için optimize edilmiş) bir");
+            add_body("sürümüdür. Orijinal proje:");
             add_sub("github.com/sertay1/Kinestop", make_color(80, 200, 255));
 
             add_header("KİNESTOP NEDİR?", make_color(255, 170, 50));
@@ -731,16 +463,16 @@ public:
             add_header("AYARLAR VE ÖZELLİKLER", make_color(80, 200, 255));
 
             add_sub("Hareket Noktalarını Aç:", make_color(255, 210, 60));
-            add_body("Noktaları çizen arka plan modülünü başlatır");
-            add_body("veya durdurur. Menüyü kombinasyonla");
-            add_body("gizleyince noktalar çalışmaya devam eder.");
+            add_body("Açıkken bu paneli kapatınca noktalar");
+            add_body("başlar. Kapalıyken B, Ultrahand");
+            add_body("menüsüne döner.");
 
-            add_sub("Açılışta Noktaları Başlat:", make_color(255, 210, 60));
-            add_body("Noktaları konsol açılırken otomatik başlatır.");
-            add_body("Sistem belleği kullandığı için varsayılan");
-            add_body("olarak kapalıdır. Açılışta sorun olursa SD");
-            add_body("karttan şu klasörü silin:");
-            add_body("atmosphere/contents/" KINESTOP_PROGRAM_ID_STR "/flags");
+            add_sub("Konsol Hareket Sensörü:", make_color(255, 210, 60));
+            add_body("Konsolun kendi hareket sensörünü de");
+            add_body("okur; böylece noktalar HOME menüsünde");
+            add_body("de hareket eder (orada kumanda hareket");
+            add_body("verisi durur). 512 KB overlay belleği");
+            add_body("kullanır; varsayılan olarak kapalıdır.");
 
             add_sub("Desen (Yerleşim):", make_color(255, 210, 60));
             add_body("Noktaların ekrandaki yerleşim şablonu:");
@@ -788,7 +520,8 @@ public:
             add_sub("Sıfır Noktasını Kalibre Et:", make_color(80, 240, 120));
             add_body("Konsolu o an tuttuğunuz açıyı (yatakta veya");
             add_body("araçta) yeni merkez sıfır açısı yapar.");
-            add_body("Noktaların açık olması gerekir.");
+            add_body("HOME menüsünde Konsol Hareket Sensörü");
+            add_body("açık olmalıdır.");
 
             add_sub("Sıfır Noktasını Sıfırla:", make_color(80, 240, 120));
             add_body("Düz ufuk seviyesine geri döndürür.");
@@ -798,19 +531,23 @@ public:
         } else {
             // ==================== ENGLISH GUIDE ====================
             add_header("HOW IT WORKS", make_color(80, 240, 120));
-            add_body("The dots are drawn by a small background");
-            add_body("sysmodule, not by this menu. Hide the menu");
-            add_body("and the dots keep running, so you can use");
-            add_body("other overlays (e.g. Status Monitor) at the");
-            add_body("same time. Ultrahand's default 4 MB overlay");
-            add_body("memory is enough.");
-            add_body("The dots pause while this panel is open");
-            add_body("and come back when you hide it with the");
-            add_body("launch combo. Leaving with B (back to the");
-            add_body("Ultrahand menu) keeps them paused so that");
-            add_body("menu stays visible (test build). To bring");
-            add_body("them back, open Kinestop again and hide it");
-            add_body("with the combo.");
+            add_body("This panel holds the settings. Leave it");
+            add_body("with B or the menu combo and the dots");
+            add_body("start: they stay on screen while you play,");
+            add_body("and the game keeps every button. Press");
+            add_body("the menu combo again to come back here.");
+            add_body("With the dots off, B returns to the");
+            add_body("Ultrahand menu.");
+            add_body("Only one Tesla overlay runs at a time:");
+            add_body("opening another overlay (or the Ultrahand");
+            add_body("menu) stops the dots. Open Kinestop again");
+            add_body("and press B to bring them back. With");
+            add_body("the dots on, use Ultrahand Menu (under");
+            add_body("Guide & Maintenance) to get there.");
+            add_body("The dots are not shown while this panel");
+            add_body("is open: press B to see your changes.");
+            add_body("Ultrahand's default 4 MB overlay memory");
+            add_body("is enough.");
 
             add_header("CREATOR & DONATION LINKS", make_color(80, 200, 255));
             add_body("Developer: SertAy");
@@ -822,8 +559,9 @@ public:
             add_sub("TikTok: @sertayintardis", make_color(80, 240, 220));
 
             add_header("ABOUT THIS BUILD", make_color(255, 210, 60));
-            add_body("This is a modified version (sysmodule split)");
-            add_body("of the original Kinestop by SertAy:");
+            add_body("This is a modified version (optimized");
+            add_body("for 4 MB of overlay memory) of the");
+            add_body("original Kinestop by SertAy:");
             add_sub("github.com/sertay1/Kinestop", make_color(80, 200, 255));
 
             add_header("WHAT IS KINESTOP?", make_color(255, 170, 50));
@@ -836,15 +574,16 @@ public:
             add_header("SETTINGS EXPLAINED", make_color(80, 200, 255));
 
             add_sub("Enable Motion Dots:", make_color(255, 210, 60));
-            add_body("Starts or stops the background sysmodule");
-            add_body("that draws the dots. Hiding this menu");
-            add_body("with the combo keeps the dots running.");
+            add_body("When on, leaving this panel starts the");
+            add_body("dots. When off, B returns to the");
+            add_body("Ultrahand menu.");
 
-            add_sub("Start Dots at Boot:", make_color(255, 210, 60));
-            add_body("Starts the dots automatically at boot. Off");
-            add_body("by default because it uses System memory.");
-            add_body("If boot ever fails, delete this SD folder:");
-            add_body("atmosphere/contents/" KINESTOP_PROGRAM_ID_STR "/flags");
+            add_sub("Console Motion Sensor:", make_color(255, 210, 60));
+            add_body("Also reads the console's own motion");
+            add_body("sensor, so the dots move at the HOME");
+            add_body("menu too (controller motion data stops");
+            add_body("there). Uses 512 KB of overlay memory;");
+            add_body("off by default.");
 
             add_sub("Pattern (Placement):", make_color(255, 210, 60));
             add_body("Choose where dots appear on screen:");
@@ -891,7 +630,8 @@ public:
             add_sub("Calibrate Zero Position:", make_color(80, 240, 120));
             add_body("Locks your current handheld holding angle");
             add_body("(e.g. reclining in bed/car) as center zero.");
-            add_body("The dots must be running.");
+            add_body("At the HOME menu this needs the Console");
+            add_body("Motion Sensor.");
 
             add_sub("Reset Zero to Flat Horizon:", make_color(80, 240, 120));
             add_body("Restores flat level horizon zero reference.");
@@ -970,7 +710,7 @@ public:
     }
 
     virtual void update() override {
-        tick_background();
+        tick_settings();
     }
 
     virtual bool handleInput(u64 keysDown, u64 keysHeld, const HidTouchState &touchPos, HidAnalogStickState joyStickPosLeft, HidAnalogStickState joyStickPosRight) override {
@@ -994,17 +734,8 @@ public:
 // SETTINGS MENU GUI (FULL DYNAMIC LOCALIZATION & SEAMLESS FLOW)
 // -------------------------------------------------------------
 class GuiKinestopSettings : public tsl::Gui {
-private:
-    tsl::elm::ToggleListItem *m_toggleEnabled = nullptr;
-    tsl::elm::ToggleListItem *m_toggleBoot    = nullptr;
-
 public:
-    GuiKinestopSettings() {
-        // Fail-fast probes only (pm:dmnt, sm HasService): never blocks when
-        // the sysmodule is stopped. Note: no auto-start here even if the
-        // config says enabled; the status line just shows "Stopped".
-        refresh_status();
-    }
+    GuiKinestopSettings() {}
 
     virtual tsl::elm::Element* createUI() override {
         bool isTr = (g_config.general.language == 1);
@@ -1015,94 +746,44 @@ public:
         // ------------------ MASTER CONTROL ------------------
         list->addItem(new tsl::elm::CategoryHeader(isTr ? "Ana Kontrol" : "Master Control"));
 
-        // Reflects whether the sysmodule is actually running.
-        m_toggleEnabled = new tsl::elm::ToggleListItem(isTr ? "Hareket Noktalarını Aç" : "Enable Motion Dots",
-                                                       g_statusRunning || (worker_busy() && g_job == Job::Start));
-        m_toggleEnabled->setStateChangedListener([this](bool newState) {
-            if (worker_busy()) {
-                m_toggleEnabled->setState(!newState);  // a start/stop is already in flight
-                return;
-            }
+        auto *toggleEnabled = new tsl::elm::ToggleListItem(isTr ? "Hareket Noktalarını Aç" : "Enable Motion Dots",
+                                                           g_config.general.enabled);
+        toggleEnabled->setStateChangedListener([](bool newState) {
             g_config.general.enabled = newState;
-            save_config_now();  // the sysmodule reads config.ini when it starts
-            start_job(newState ? Job::Start : Job::Stop);
+            save_config_now();
         });
-        list->addItem(m_toggleEnabled);
+        list->addItem(toggleEnabled);
 
-        // How the dots pause around this panel. Read live: the coexistence
-        // test toggle further down changes it.
-        list->addItem(new tsl::elm::CustomDrawer([isTr](tsl::gfx::Renderer *renderer, s32 x, s32 y, s32 w, s32 h) {
-            static constexpr const char* pausedEn[] = {
-                "Dots pause while this panel is open;",
-                "hide it with the combo to resume them.",
-                "After B they stay paused until you open",
-                "Kinestop again and hide it with the combo.",
-            };
-            static constexpr const char* pausedTr[] = {
-                "Panel açıkken noktalar duraklatılır;",
-                "devam için paneli kombinasyonla gizleyin.",
-                "B ile çıkarsanız, Kinestop'u tekrar açıp",
-                "kombinasyonla gizleyene dek duraklar.",
-            };
-            static constexpr const char* testEn[] = {
-                "Coexistence test on: the dots are not",
-                "paused for this panel or other menus.",
-            };
-            static constexpr const char* testTr[] = {
-                "Uyumluluk testi açık: noktalar bu panel",
-                "ve diğer menüler için duraklatılmaz.",
-            };
-            const bool test = no_suspend_test();
-            const char* const* lines = test ? (isTr ? testTr : testEn) : (isTr ? pausedTr : pausedEn);
-            const int count = test ? 2 : 4;
-            const tsl::Color note = make_color(255, 170, 50);
-            for (int i = 0; i < count; ++i)
-                renderer->drawString(lines[i], false, x + 19, y + 20 + i * NoteLineStep, 15, note);
-        }), 4 * NoteLineStep + 12);
+        static constexpr const char* enabledEn[] = {
+            "On: B or the menu combo shows the dots.",
+            "Off: B returns to the Ultrahand menu.",
+        };
+        static constexpr const char* enabledTr[] = {
+            "Açık: B veya menü kombinasyonu",
+            "noktaları gösterir. Kapalı: B,",
+            "Ultrahand menüsüne döner.",
+        };
+        if (isTr) add_note(list, enabledTr, 3);
+        else      add_note(list, enabledEn, 2);
 
-        // Diagnostics block (test build): lines are re-formatted by
-        // refresh_status() about once per second.
-        list->addItem(new tsl::elm::CustomDrawer([](tsl::gfx::Renderer *renderer, s32 x, s32 y, s32 w, s32 h) {
-            for (int i = 0; i < g_diagCount; ++i)
-                renderer->drawString(g_diagLines[i], false, x + 19, y + 16 + i * DiagLineStep, DiagFontSize,
-                                     g_diagColors[i], w - 30);
-        }), DiagBlockHeight);
-
-        m_toggleBoot = new tsl::elm::ToggleListItem(isTr ? "Açılışta Noktaları Başlat" : "Start Dots at Boot",
-                                                    file_exists(BootFlagPath));
-        m_toggleBoot->setStateChangedListener([this](bool newState) {
-            const bool tr = is_tr();
-            if (newState) {
-                if (!ipc::isInstalled()) {
-                    show_notice(ColorError, tr ? "Yüklü değil" : "Not installed");
-                    m_toggleBoot->setState(false);
-                    return;
-                }
-                mkdir(BootFlagDir, 0777);
-                FILE* f = std::fopen(BootFlagPath, "wb");
-                if (f == nullptr) {
-                    show_notice(ColorError, tr ? "Açılış bayrağı yazılamadı" : "Could not write boot flag");
-                    m_toggleBoot->setState(false);
-                    return;
-                }
-                std::fclose(f);
-            } else {
-                std::remove(BootFlagPath);
-                if (file_exists(BootFlagPath)) {
-                    show_notice(ColorError, tr ? "Açılış bayrağı silinemedi" : "Could not remove boot flag");
-                    m_toggleBoot->setState(true);
-                }
-            }
+        auto *toggleConsoleSensor = new tsl::elm::ToggleListItem(isTr ? "Konsol Hareket Sensörü" : "Console Motion Sensor",
+                                                                 g_config.general.console_sensor);
+        toggleConsoleSensor->setStateChangedListener([](bool newState) {
+            g_config.general.console_sensor = newState;
+            save_config_now();
+            apply_console_sensor();
         });
-        list->addItem(m_toggleBoot);
+        list->addItem(toggleConsoleSensor);
 
-        list->addItem(new tsl::elm::CustomDrawer([isTr](tsl::gfx::Renderer *renderer, s32 x, s32 y, s32 w, s32 h) {
-            const tsl::Color note = make_color(255, 170, 50);
-            renderer->drawString(isTr ? "Açılışta sistem belleği kullanır." : "Boot start uses System memory.",
-                                 false, x + 19, y + 20, 15, note);
-            renderer->drawString(isTr ? "Emin değilseniz kapalı bırakın." : "Leave it off if you are unsure.",
-                                 false, x + 19, y + 40, 15, note);
-        }), 52);
+        static constexpr const char* sensorEn[] = {
+            "Lets dots move at the HOME menu",
+            "(uses 512 KB).",
+        };
+        static constexpr const char* sensorTr[] = {
+            "Noktalar HOME menüsünde de hareket",
+            "eder (512 KB kullanır).",
+        };
+        add_note(list, isTr ? sensorTr : sensorEn, 2);
 
         // ------------------ PATTERN & DENSITY ------------------
         list->addItem(new tsl::elm::CategoryHeader(isTr ? "Yerleşim ve Yoğunluk" : "Placement & Density"));
@@ -1262,8 +943,8 @@ public:
         });
         list->addItem(toggleInvertRoll);
 
-        // Calibration Handheld Zero Button: the sysmodule owns the IMU, so it
-        // takes the zero and hands the offsets back for config.ini.
+        // Calibration Handheld Zero Button: the current filtered orientation,
+        // sampled by this panel, becomes the zero.
         auto *calibCurrentBtn = new tsl::elm::ListItem(
             isTr ? "Sıfır Noktasını Kalibre Et" : "Calibrate Zero Position",
             isTr ? "Mevcut tutuş açısını merkez sıfır yapar" : "Lock current holding angle as center zero"
@@ -1271,23 +952,15 @@ public:
         calibCurrentBtn->setClickListener([](u64 keys) {
             if (keys & HidNpadButton_A) {
                 const bool tr = is_tr();
-                CtlLock lock(g_ctlMutex);
-                if (worker_busy() || !ipc::isRunning()) {
-                    show_notice(ColorWarn, tr ? "Önce noktaları açın" : "Enable the dots first");
+                if (!sensor_fresh()) {
+                    // No npad data at the HOME menu, and no console sensor.
+                    show_notice(ColorWarn, tr ? "Hareket verisi yok" : "No motion data");
                     return true;
                 }
-                KinestopCalibration cal{};
-                const Result rc = ipc::calibrate(&cal);
-                if (R_SUCCEEDED(rc)) {
-                    g_config.calibration.pitch_offset = cal.pitch_offset;
-                    g_config.calibration.roll_offset  = cal.roll_offset;
-                    save_config_now();
-                    show_notice(ColorOk, tr ? "Sıfır noktası kalibre edildi" : "Zero position calibrated");
-                } else if (rc == ipc::ResultNotRunning) {
-                    show_notice(ColorWarn, tr ? "Önce noktaları açın" : "Enable the dots first");
-                } else {
-                    show_notice(ColorError, tr ? "Kalibrasyon başarısız: " KS_RC_FMT : "Calibration failed: " KS_RC_FMT, KS_RC_ARGS(rc));
-                }
+                g_config.calibration.pitch_offset = g_orientation.pitch_deg;
+                g_config.calibration.roll_offset  = g_orientation.roll_deg;
+                save_config_now();
+                show_notice(ColorOk, tr ? "Sıfır noktası kalibre edildi" : "Zero position calibrated");
                 return true;
             }
             return false;
@@ -1301,104 +974,11 @@ public:
                 g_config.calibration.pitch_offset = 0.0f;
                 g_config.calibration.roll_offset = 0.0f;
                 save_config_now();
-                push_config();
                 return true;
             }
             return false;
         });
         list->addItem(resetCalibItem);
-
-        // ------------------ DIAGNOSTICS (TEST BUILD) ------------------
-        list->addItem(new tsl::elm::CategoryHeader(isTr ? "Tanılama (test sürümü)" : "Diagnostics (test build)"));
-
-        // Each toggle is followed by a note saying what it does. The two
-        // layer toggles pick one of three layer modes; both off is the
-        // normal full-screen layer.
-        struct DebugToggle { const char* en; const char* tr; u32 bit; NoteText intro; NoteText note; };
-        static constexpr DebugToggle debugToggles[] = {
-            { "Blink test", "Yanıp sönme testi", KINESTOP_DEBUG_BLINK_TEST, {}, {
-                { "Dots off 3 s out of every 10 s.", nullptr },
-                { "Noktalar her 10 sn'de 3 sn kapanır.", nullptr },
-            } },
-            { "Unscaled test layer", "Ölçeklenmemiş test katmanı", KINESTOP_DEBUG_UNSCALED_LAYER, {
-                { "Layer mode. With both toggles below off:",
-                  "full screen 2x (default), the 640x360",
-                  "image scaled 2x to fill the screen.", nullptr },
-                { "Katman modu. Alttaki iki ayar kapalıysa:",
-                  "tam ekran 2x (varsayılan), 640x360",
-                  "görüntü 2 kat büyütülüp ekranı doldurur.", nullptr },
-            }, {
-                { "Quarter 1x: 640x360 image at 1:1 in the",
-                  "top-left quarter (pattern at half size).", nullptr },
-                { "Çeyrek 1x: 640x360 görüntü 1:1 boyutta",
-                  "sol üst çeyrekte (tüm desen, yarı boyut).", nullptr },
-            } },
-            { "Small 2x-scaled test layer", "Küçük 2x ölçekli test katmanı", KINESTOP_DEBUG_SCALED_SMALL, {}, {
-                { "Quarter 2x: a 320x180 image scaled 2x",
-                  "into the top-left quarter. If both layer",
-                  "toggles are on, the unscaled one wins.", nullptr },
-                { "Çeyrek 2x: 320x180 görüntü 2 kat",
-                  "büyütülüp sol üst çeyreğe çizilir. İki",
-                  "katman ayarı da açıksa ölçeklenmemiş",
-                  "katman geçerli olur.", nullptr },
-            } },
-            { "Verbose log", "Ayrıntılı günlük", KINESTOP_DEBUG_VERBOSE_LOG, {}, {
-                { "1 line per second in sysmodule.log;",
-                  "each SD write may cause a small hitch.", nullptr },
-                { "sysmodule.log'a saniyede 1 satır yazar;",
-                  "her SD yazımı küçük takılma yapabilir.", nullptr },
-            } },
-            { "Low Z test layer (use with the test below)", "Düşük Z test katmanı (alttaki testle kullanın)",
-              KINESTOP_DEBUG_LOW_Z, {}, {
-                { "Puts the dots at Z 33, far below Tesla",
-                  "menus. Turn on, then turn on 'Keep dots",
-                  "while menus open' and check whether this",
-                  "panel and the dots both stay visible.", nullptr },
-                { "Noktaları Z 33'e, Tesla menülerinin çok",
-                  "altına koyar. Açın, sonra 'Menüler",
-                  "açıkken noktaları göster'i açıp bu panel",
-                  "ve noktalar birlikte görünüyor mu, bakın.", nullptr },
-            } },
-            { "Keep dots while menus open (coexistence test)",
-              "Menüler açıkken noktaları göster (uyumluluk testi)", KINESTOP_DEBUG_NO_SUSPEND, {}, {
-                { "Dots stay on while this panel and the",
-                  "Ultrahand menu are open. If a menu is",
-                  "gone for more than a few seconds, reboot.",
-                  "This stays on after a reboot: turn it",
-                  "off before starting the dots, or set",
-                  "debug_flags=4 in config.ini from a PC." },
-                { "Bu panel ve Ultrahand menüsü açıkken",
-                  "noktalar ekranda kalır. Menü birkaç",
-                  "saniyede geri gelmezse yeniden başlatın.",
-                  "Bu ayar yeniden başlatınca da açık kalır:",
-                  "noktaları başlatmadan önce kapatın ya da",
-                  "PC'den config.ini'de debug_flags=4 yapın." },
-            } },
-        };
-        for (const auto& dt : debugToggles) {
-            if (dt.intro.en[0] != nullptr)
-                add_note(list, dt.intro, isTr);
-            auto *toggle = new tsl::elm::ToggleListItem(isTr ? dt.tr : dt.en,
-                                                        (g_config.general.debug_flags & dt.bit) != 0);
-            const u32 bit = dt.bit;
-            toggle->setStateChangedListener([bit](bool newState) {
-                if (newState)
-                    g_config.general.debug_flags |= (int)bit;
-                else
-                    g_config.general.debug_flags &= ~(int)bit;
-                g_config.sanitize();
-                save_config_now();
-                push_config();
-                // Coexistence test: takes effect at once, with this panel
-                // still on screen. On: resume the dots (the experiment).
-                // Off: suspend them again like a normal open panel.
-                if (bit == KINESTOP_DEBUG_NO_SUSPEND)
-                    suspend_dots(!newState, !newState);
-                g_refreshNow = true;
-            });
-            list->addItem(toggle);
-            add_note(list, dt.note, isTr);
-        }
 
         // ------------------ GUIDE & MAINTENANCE ------------------
         list->addItem(new tsl::elm::CategoryHeader(isTr ? "Rehber ve Bakım" : "Guide & Maintenance"));
@@ -1413,6 +993,19 @@ public:
             return false;
         });
         list->addItem(guideBtn);
+
+        // Ultrahand menu without turning the dots off (they stop until
+        // Kinestop is opened again).
+        auto *menuBtn = new tsl::elm::ListItem(isTr ? "Ultrahand Menüsü" : "Ultrahand Menu");
+        menuBtn->setClickListener([](u64 keys) {
+            if (keys & HidNpadButton_A) {
+                flush_config();
+                open_ultrahand_menu();
+                return true;
+            }
+            return false;
+        });
+        list->addItem(menuBtn);
 
         // 2. Language Selector (Between Guide and Reset Settings)
         auto *langTrackBar = new tsl::elm::NamedStepTrackBar("", {"English", "Türkçe"}, true, isTr ? "Dil / Language" : "Language");
@@ -1430,15 +1023,11 @@ public:
         auto *resetDefaultsBtn = new tsl::elm::ListItem(isTr ? "Ayarları Sıfırla" : "Reset Settings");
         resetDefaultsBtn->setClickListener([](u64 keys) {
             if (keys & HidNpadButton_A) {
-                // Everything goes back to defaults (as in the original),
-                // except "enabled": it mirrors the master toggle, i.e.
-                // whether the sysmodule is running, which a reset does not
-                // start or stop.
-                const bool enabled = g_config.general.enabled;
+                const bool consoleSensor = g_config.general.console_sensor;
                 g_config.set_defaults();
-                g_config.general.enabled = enabled;
                 save_config_now();
-                push_config();
+                if (consoleSensor != g_config.general.console_sensor)
+                    apply_console_sensor();
                 g_needGuiReload = true;
                 return true;
             }
@@ -1453,27 +1042,22 @@ public:
     virtual void update() override {
         if (g_needGuiReload) {
             g_needGuiReload = false;
-            g_refreshNow = true;  // re-format the status line in the new language
             tsl::swapTo<GuiKinestopSettings>();
             return;
         }
-
-        tick_background();
-
-        // Keep the master toggle in sync with reality (failed start, the
-        // sysmodule exiting, ...). Not while a job is in flight: the toggle
-        // already shows where it is heading.
-        if (!worker_busy() && m_toggleEnabled != nullptr && m_toggleEnabled->getState() != g_statusRunning)
-            m_toggleEnabled->setState(g_statusRunning);
+        tick_settings();
     }
 
     virtual bool handleInput(u64 keysDown, u64 keysHeld, const HidTouchState &touchPos, HidAnalogStickState joyStickPosLeft, HidAnalogStickState joyStickPosRight) override {
-        // B closes the panel (back to the Ultrahand menu). The dots stay
-        // suspended (see exitServices) until Kinestop is opened again and
-        // hidden with the combo; the note under the master toggle says so.
+        // SMART (B) BUTTON:
+        // - If Enabled: relaunch as the in-game HUD (floating dots in game!)
+        // - If Disabled: exit directly to Ultrahand main menu!
         if (keysDown & HidNpadButton_B) {
             flush_config();
-            tsl::goBack();
+            if (g_config.general.enabled)
+                relaunch(true);
+            else
+                open_ultrahand_menu();
             return true;
         }
         return false;
@@ -1482,66 +1066,90 @@ public:
 
 class KinestopOverlay : public tsl::Overlay {
 public:
-    // While this panel is on screen the sysmodule takes its own VI layer
-    // down (test.2 showed the panel and the Ultrahand menu stay visible that
-    // way). The KINESTOP_DEBUG_NO_SUSPEND coexistence test turns every
-    // suspend into a resume (suspend_dots). initServices() runs
-    // before libtesla creates its layer (initScreen), exitServices() after
-    // it is destroyed (exitScreen). onShow() runs on the main loop thread;
-    // onHide() also from Ultrahand's background event thread, hence the lock.
+    // initServices() runs before libtesla creates its layer and framebuffer
+    // (initScreen), so the optional 512 KiB SevenSixAxis buffer is carved out
+    // of an unfragmented heap. exitServices() runs after the background
+    // poller has stopped and before libtesla's final hidExit().
     virtual void initServices() override {
+        // libtesla derives these from heap_size.bin or, without it, from a
+        // per-HOS default (8 MB before HOS 20) while nx-ovlloader then gives
+        // 4 MB: always take the 4 MB paths (no wallpaper, no 4 x 128 KiB
+        // render threads per filled rect). Set after tsl::loop() assigns them
+        // and before initScreen()/createUI().
+        ult::limitedMemory         = true;
+        ult::expandedMemory        = false;
+        ult::furtherExpandedMemory = false;
+
         g_config.load();
-        ipc::initialize();  // pm:shell (launch/terminate) + pm:dmnt (liveness)
-        suspend_dots(true, true);
-        g_suspendedAtInit = true;
+        if (g_hudMode) {
+            // Keep the dots out of screenshots/videos unless asked for: the
+            // layer joins only the screen stacks (Kinestop patch), and
+            // libtesla must not add the capture stacks back.
+            tsl::minimalLayerStacksInCaptures = g_config.visual.show_in_captures;
+            if (!g_config.visual.show_in_captures) {
+                screenshotsAreDisabled.store(true, std::memory_order_release);
+                screenshotsAreForceDisabled.store(true, std::memory_order_release);
+            }
+        } else {
+            register_launch_modes();
+        }
+        sensor_start(g_config.general.console_sensor);
     }
 
-    // The process only exits to load another Tesla overlay: the Ultrahand
-    // menu (B at the root, combo return - often shown at once) or another
-    // overlay's launch combo. Resuming here would put our layer back up
-    // just as that overlay's layer appears, i.e. symptom (A) for the menu
-    // itself. So the dots stay suspended (and are suspended again if the
-    // panel was hidden); they resume when this panel is hidden with the
-    // combo (onHide), or when the sysmodule is restarted. Closing the
-    // Ultrahand menu afterwards cannot be detected from here, so the panel
-    // and the guide tell the user to reopen Kinestop and hide it instead.
     virtual void exitServices() override {
-        CtlLock lock(g_ctlMutex);
-        g_panelVisible.store(false, std::memory_order_release);
-        if (worker_busy())
-            on_job_finished();  // joins: bounded, start() <= ~1.5s, stop() <= ~1s
-        flush_config();
-        suspend_dots(true, false);
-        ipc::exit();
+        sensor_stop();
+        if (!g_hudMode)
+            flush_config();
     }
 
     virtual void onShow() override {
-        CtlLock lock(g_ctlMutex);
-        g_panelVisible.store(true, std::memory_order_release);
-        if (g_suspendedAtInit)
-            g_suspendedAtInit = false;  // keep the ack time measured there
-        else
-            suspend_dots(true, true);   // waits <= SuspendWaitNs for the layer to go
-        g_refreshNow = true;
+        // libtesla grabs the controls right before show(); the HUD hands
+        // them straight back to the game (and the HOME menu).
+        if (g_hudMode)
+            tsl::hlp::requestForeground(false);
     }
 
+    // Settings mode only (the HUD is never hidden): a hide (menu combo,
+    // HOME, power, touch outside) leaves the panel, so the dots come back
+    // as with B. May run on libtesla's background poller thread: only
+    // queues the relaunch; libtesla's main loop sees launchingOverlay and
+    // exits, and exitServices() saves the config.
     virtual void onHide() override {
-        CtlLock lock(g_ctlMutex);
-        g_panelVisible.store(false, std::memory_order_release);
-        g_suspendedAtInit = false;
-        // Rare: hidden while a start/stop is in flight. Finish it first (the
-        // worker may be about to suspend, and ipc_client is single-threaded).
-        if (worker_busy())
-            on_job_finished();
-        flush_config();
-        suspend_dots(false, false);
+        if (g_hudMode || !g_config.general.enabled)
+            return;
+        queue_relaunch(true);
+        ult::launchingOverlay.store(true, std::memory_order_release);
     }
 
     virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {
+        if (g_hudMode)
+            return initially<GuiKinestopHud>();
         return initially<GuiKinestopSettings>();
     }
 };
 
 int main(int argc, char **argv) {
+    if (argc > 0 && argv[0][0] != '\0')
+        g_selfName = ult::getNameFromPath(argv[0]);
+    g_hudMode = kinestop::hud::is_hud_launch(argc, argv);
+
+    tsl::hidReinitHook = on_hid_reinit;  // Kinestop patch: SevenSixAxis-safe power button
+
+    if (g_hudMode) {
+        // 640x360 RGBA4444 (983,040 B for both buffers) stretched over a
+        // full-screen layer (Kinestop patch), instead of the original's
+        // 1280x720 (3.9 MB) that needed 8 MB of overlay memory.
+        ult::DefaultFramebufferWidth  = HudFramebufferWidth;
+        ult::DefaultFramebufferHeight = HudFramebufferHeight;
+        tsl::fullScreenScaledLayer = true;
+        tsl::minimalLayerStacks    = true;
+        // Never hidden by the menu combo, HOME, power or touches: the dots
+        // stay up until another overlay is launched.
+        tsl::disableHiding = true;
+        // Pressing the HUD mode's own Ultrahand combo again opens our
+        // settings instead of the Ultrahand menu.
+        comboReturnToSelfMenu.store(true, std::memory_order_release);
+    }
+
     return tsl::loop<KinestopOverlay>(argc, argv);
 }

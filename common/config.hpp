@@ -1,15 +1,14 @@
 #pragma once
 
 #include <cstdint>
-#include "kinestop_ipc.h"
 
 namespace kinestop {
 
 struct GeneralConfig {
-    bool enabled = true;        // user wants dots shown (overlay starts/stops the sysmodule from this)
+    bool enabled = true;        // dots shown when the settings panel is left
     int poll_rate_hz = 60;
     int language = 0;           // 0: English, 1: Türkçe
-    int debug_flags = 0;        // KINESTOP_DEBUG_* bitmask (test builds); ini key "debug_flags"
+    bool console_sensor = false; // also open the console IMU (SevenSixAxis, 512 KiB): dots move at the HOME menu
 };
 
 struct VisualConfig {
@@ -45,7 +44,7 @@ struct Config {
     static constexpr const char* DEFAULT_DIR  = "sdmc:/config/kinestop";
     static constexpr const char* DEFAULT_PATH = "sdmc:/config/kinestop/config.ini";
 
-    // stdio-based (no iostreams: keeps the sysmodule small).
+    // stdio-based (no iostreams: keeps the overlay small).
     // load() starts from defaults, so keys missing from the file keep their default.
     bool load(const char* filepath = DEFAULT_PATH);
     bool save(const char* filepath = DEFAULT_PATH) const;
@@ -53,9 +52,6 @@ struct Config {
 
     // Clamp every field into its documented range.
     void sanitize();
-
-    void to_wire(KinestopWireConfig& out) const;
-    void from_wire(const KinestopWireConfig& in);  // sanitizes; of general.* only poll_rate_hz and debug_flags are on the wire
 };
 
 } // namespace kinestop

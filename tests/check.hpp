@@ -1,6 +1,6 @@
 // Kinestop host tests - minimal assertion helpers.
 //
-// Part of the sysmodule/overlay split of the original Kinestop by SertAy
+// Part of a modified version of the original Kinestop by SertAy
 // (https://github.com/sertay1/Kinestop).
 
 #pragma once

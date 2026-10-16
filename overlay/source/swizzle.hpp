@@ -1,6 +1,6 @@
-// Kinestop sysmodule - block-linear pixel addressing for 16-bit framebuffers.
+// Kinestop HUD - block-linear pixel addressing for 16-bit framebuffers.
 //
-// Part of the sysmodule/overlay split of the original Kinestop by SertAy
+// Part of a modified version of the original Kinestop by SertAy
 // (https://github.com/sertay1/Kinestop).
 //
 // Header-only and host-compilable (stdint only) so it can be unit tested

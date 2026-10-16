@@ -966,6 +966,27 @@ namespace tsl {
 
     inline bool overrideBackButton = false; // for properly overriding the automatic "go back" functionality of KEY_B button presses
     inline bool disableHiding = false; // for manually disabling the hide overlay functionality
+
+    // ── Kinestop patch ───────────────────────────────────────────────────────
+    // fullScreenScaledLayer: the layer always covers the whole screen
+    //   (ScreenWidth x ScreenHeight VI units at 0,0) and VI scales the
+    //   framebuffer up to it (FitToLayer), instead of the default
+    //   1920*fbW/1280 x 1080*fbH/720. Honoured by Renderer::init() and
+    //   updateLayerSize(); the underscan Z handling is unchanged.
+    // minimalLayerStacks: the layer joins only the Default and Lcd stacks,
+    //   plus Screenshot and Recording when minimalLayerStacksInCaptures,
+    //   instead of all eight stacks.
+    // hidReinitHook: called by the background poller on the power button
+    //   right before its hidExit() (false) and right after its
+    //   hidInitialize() (true, even when that failed), so the overlay can
+    //   finalize a SevenSixAxis sensor (libnx aborts in hidExit() while its
+    //   buffer is registered) and start it again.
+    // Set them before tsl::loop().
+    inline bool fullScreenScaledLayer = false;
+    inline bool minimalLayerStacks = false;
+    inline bool minimalLayerStacksInCaptures = false;
+    inline void (*hidReinitHook)(bool reinitialized) = nullptr;
+    // ── end Kinestop patch ───────────────────────────────────────────────────
     inline std::atomic<bool> homeButtonPressedInGame{false}; ///< Set by the background poller when home fires during a game session (disableHiding=true); consumed each frame by the player GUI to release foreground.
 
     // Theme color variable definitions — defined once in tesla.cpp
@@ -4375,6 +4396,10 @@ namespace tsl {
                     cfg::LayerWidth  = cfg::ScreenWidth  * (float(cfg::FramebufferWidth)  / divW);
                     cfg::LayerHeight = cfg::ScreenHeight * (float(cfg::FramebufferHeight) / divH);
                 }
+                if (tsl::fullScreenScaledLayer) { // Kinestop patch: full-screen layer, framebuffer scaled to it
+                    cfg::LayerWidth  = cfg::ScreenWidth;
+                    cfg::LayerHeight = cfg::ScreenHeight;
+                }
             
                 // Universal underscan corrections. Skipped in pixel-perfect mode (layer == framebuffer 1:1).
                 if (!ult::windowedLayerPixelPerfect) {
@@ -5093,6 +5118,10 @@ namespace tsl {
                     cfg::LayerWidth  = cfg::ScreenWidth  * (float(cfg::FramebufferWidth)  / divW);
                     cfg::LayerHeight = cfg::ScreenHeight * (float(cfg::FramebufferHeight) / divH);
                 }
+                if (tsl::fullScreenScaledLayer) { // Kinestop patch: full-screen layer, framebuffer scaled to it
+                    cfg::LayerWidth  = cfg::ScreenWidth;
+                    cfg::LayerHeight = cfg::ScreenHeight;
+                }
 
                 // Universal underscan corrections. Skipped in pixel-perfect mode (layer == framebuffer 1:1).
                 if (!ult::windowedLayerPixelPerfect) {
@@ -5196,6 +5225,14 @@ namespace tsl {
                         ASSERT_FATAL(viSetLayerZ(&this->m_layer, 34)); // 34 is the edge for underscanning
                     }
 
+                    if (tsl::minimalLayerStacks) { // Kinestop patch: screen only, captures on request
+                        ASSERT_FATAL(tsl::hlp::viAddToLayerStack(&this->m_layer, ViLayerStack_Default));
+                        ASSERT_FATAL(tsl::hlp::viAddToLayerStack(&this->m_layer, ViLayerStack_Lcd));
+                        if (tsl::minimalLayerStacksInCaptures) {
+                            ASSERT_FATAL(tsl::hlp::viAddToLayerStack(&this->m_layer, ViLayerStack_Screenshot));
+                            ASSERT_FATAL(tsl::hlp::viAddToLayerStack(&this->m_layer, ViLayerStack_Recording));
+                        }
+                    } else {
                     ASSERT_FATAL(tsl::hlp::viAddToLayerStack(&this->m_layer, ViLayerStack_Default));
                     ASSERT_FATAL(tsl::hlp::viAddToLayerStack(&this->m_layer, ViLayerStack_Screenshot));
                     ASSERT_FATAL(tsl::hlp::viAddToLayerStack(&this->m_layer, ViLayerStack_Recording));
@@ -5204,6 +5241,7 @@ namespace tsl {
                     ASSERT_FATAL(tsl::hlp::viAddToLayerStack(&this->m_layer, ViLayerStack_Null));
                     ASSERT_FATAL(tsl::hlp::viAddToLayerStack(&this->m_layer, ViLayerStack_ApplicationForDebug));
                     ASSERT_FATAL(tsl::hlp::viAddToLayerStack(&this->m_layer, ViLayerStack_Lcd));
+                    } // end Kinestop patch
                     
                     ASSERT_FATAL(viSetLayerSize(&this->m_layer, cfg::LayerWidth, cfg::LayerHeight));
                     ASSERT_FATAL(viSetLayerPosition(&this->m_layer, cfg::LayerPosX, cfg::LayerPosY));
@@ -15064,6 +15102,7 @@ namespace tsl {
                             hidReinitInProgress.store(true, std::memory_order_seq_cst);
                             svcSleepThread(20'000'000ULL); // 20ms — let feedback thread finish
 
+                            if (tsl::hidReinitHook) tsl::hidReinitHook(false); // Kinestop patch
                             hidExit();
                             if (R_SUCCEEDED(hidInitialize())) {
                                 padInitialize(&pad_p1, HidNpadIdType_No1);
@@ -15081,6 +15120,7 @@ namespace tsl {
                                 triggerInitHaptics.store(true, std::memory_order_release);
                                 signalFeedback(); // wake poller to run initHaptics
                             }
+                            if (tsl::hidReinitHook) tsl::hidReinitHook(true); // Kinestop patch
 
                             hidReinitInProgress.store(false, std::memory_order_seq_cst);
                             break;

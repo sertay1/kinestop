@@ -24,18 +24,26 @@
 
 > [!IMPORTANT]
 > **This is a modified version of [Kinestop by SertAy](https://github.com/sertay1/Kinestop).** All credit for the original idea, design, motion-cue logic, color themes and guide goes to **SertAy**.
-> This version moves dot rendering out of the overlay and into a small background sysmodule. In line with section 2 of the [LICENSE](LICENSE), the modifications are:
-> * A new sysmodule (`atmosphere/contents/4200000000001042`) that reads the motion sensors and draws the dots on its own display layer.
-> * The overlay (`kinestop.ovl`) is now only a settings panel: it starts/stops the sysmodule and sends it your settings.
-> * No more 8MB Ultrahand requirement; other overlays can be used while the dots are on.
-> * New option: **Show in Screenshots/Videos**. Removed: center reticle / roll indicator settings.
+> This version is optimized to run in Ultrahand's **default 4MB** overlay memory. In line with section 2 of the [LICENSE](LICENSE), the modifications are:
+> * The dots are drawn at 640×360 and scaled up to full screen by the Switch's display hardware, instead of a full 1280×720 image. This is what removes the 8MB Ultrahand requirement.
+> * The settings panel and the dots are two modes of the same overlay (`kinestop.ovl`): leaving the panel with **B** switches to the dots, and the Ultrahand key combo switches back to the panel.
+> * The dots are not shown while another overlay or the Ultrahand menu is open, because the Switch can show only one overlay layer at a time. Leaving the Kinestop panel brings them back; after another overlay, open Kinestop and press **B**.
+> * The settings panel no longer shows a live preview of the dots behind it; press **B** to see your changes.
+> * From the dots, only the Ultrahand key combo opens the settings; the original's left-edge touch swipe and extra button combos were removed. A new **Ultrahand Menu** item in the panel opens the Ultrahand menu without turning the dots off.
+> * Kinestop adds a **Motion Dots** launch mode to its entry in Ultrahand's `overlays.ini`, so Ultrahand can start the dots directly (and give them their own key combo).
+> * New options: **Console Motion Sensor** (lets the dots move at the HOME menu) and **Show in Screenshots/Videos**. The unused config keys `draw_center_reticle` / `draw_roll_indicators` are ignored.
+> * A small patch to the bundled libultrahand/libtesla (marked `Kinestop patch` in the source) for the full-screen scaled layer and the motion sensor.
 >
-> **Bu, [SertAy'ın Kinestop](https://github.com/sertay1/Kinestop) projesinin değiştirilmiş bir sürümüdür.** Orijinal fikir, tasarım, hareket algoritması, renk temaları ve rehberin tüm hakları **SertAy**'a aittir. Bu sürümde noktaların çizimi overlay'den alınıp arka planda çalışan küçük bir sistem modülüne (sysmodule) taşınmıştır. Değişiklikler [LICENSE](LICENSE) dosyasının 2. maddesi gereği yukarıda listelenmiştir.
+> **Bu, [SertAy'ın Kinestop](https://github.com/sertay1/Kinestop) projesinin değiştirilmiş bir sürümüdür.** Orijinal fikir, tasarım, hareket algoritması, renk temaları ve rehberin tüm hakları **SertAy**'a aittir. Bu sürüm, UltraHand'in **varsayılan 4MB** overlay belleğiyle çalışacak şekilde optimize edilmiştir: noktalar 640×360 çözünürlükte çizilip Switch'in ekran donanımıyla tam ekrana büyütülür; ayar paneli ve noktalar aynı overlay'in iki modudur; Switch aynı anda yalnızca bir overlay katmanı gösterebildiği için başka bir overlay veya UltraHand menüsü açıkken noktalar görünmez (Kinestop panelinden çıkınca geri gelirler, başka bir overlay'den sonra Kinestop'u açıp **B**'ye basın); ayar paneli artık arkasında noktaların canlı önizlemesini göstermez (değişiklikleri görmek için **B**'ye basın); noktalardan ayarlara yalnızca UltraHand kısayoluyla dönülür, orijinaldeki sol kenardan kaydırma ve ek tuş kombinasyonları kaldırılmıştır; panele, noktaları kapatmadan UltraHand menüsünü açan **Ultrahand Menüsü** seçeneği eklenmiştir; Kinestop, UltraHand'in `overlays.ini` dosyasındaki kendi kaydına noktaları doğrudan başlatan bir **Motion Dots** başlatma modu ekler; **Konsol Hareket Sensörü** ve **Görüntü ve Kayıtlarda Göster** seçenekleri eklenmiş, kullanılmayan `draw_center_reticle` / `draw_roll_indicators` ayar anahtarları yok sayılmaktadır; birlikte gelen libultrahand/libtesla kütüphanesine küçük bir yama yapılmıştır (kaynakta `Kinestop patch` ile işaretli). Değişiklikler [LICENSE](LICENSE) dosyasının 2. maddesi gereği burada listelenmiştir.
 
 > [!WARNING]
-> **Status:** version 2.0.0 (the sysmodule split) is a **test build and does not work correctly yet**. The first console test (HOS 19.0.1, handheld) showed two problems: the dots appeared but did not move, and while they were on, overlay menus (the Kinestop panel and the Ultrahand menu) were not drawn. 2.0.0-test.2 showed that the dots do move, and that the menus stay visible as long as the dots are paused while a menu is open, which is what this build does by default. **2.0.0-test.3** reads the motion sensor at its full rate (the dots moved in steps in test.2), writes its log in the background, and adds a test that keeps the dots on while menus are open, to find out whether both can be shown at the same time. See **Test build (2.0.0-test.3)** below for what to try. **Normal use:** open the Kinestop panel from the Ultrahand menu, turn the dots on, then *hide* the panel with the Ultrahand launch combo; the dots come back. Pressing the combo again shows the panel (dots paused). Leaving the panel with **B** (back to the Ultrahand menu) keeps the dots paused so that the menu stays visible; to bring them back, open Kinestop again and hide it with the combo. Live diagnostics are shown in the panel and written to `SD:/config/kinestop/sysmodule.log`. The [original release](https://github.com/sertay1/Kinestop/releases) is the stable, overlay-only version.
+> **Status:** version **2.0.0-test.5** is a **test build** and has not been tested on a console yet. The earlier 2.0.0 test builds drew the dots from a separate sysmodule; console tests showed that the Switch never displays that layer together with an overlay menu, so that design was dropped. This build goes back to a single overlay, like the original, but fits in the default 4MB. See **Test build (2.0.0-test.5)** below for what to try. The [original release](https://github.com/sertay1/Kinestop/releases) is the stable version.
 >
-> **Durum:** 2.0.0 sürümü (sysmodule ayrımı) bir **deneme sürümüdür ve henüz doğru çalışmıyor.** İlk konsol testinde (HOS 19.0.1, el modu) iki sorun görüldü: noktalar göründü ama hareket etmedi, ve noktalar açıkken overlay menüleri (Kinestop paneli ve Ultrahand menüsü) çizilmedi. 2.0.0-test.2, noktaların hareket ettiğini ve bir menü açıkken noktalar duraklatıldığı sürece menülerin görünür kaldığını gösterdi; bu sürüm de varsayılan olarak böyle çalışır. **2.0.0-test.3** hareket sensörünü tam hızında okur (test.2'de noktalar kesik kesik hareket ediyordu), günlüğü arka planda yazar ve noktaların menülerle aynı anda gösterilip gösterilemeyeceğini anlamak için menüler açıkken noktaları açık tutan bir test ekler. Ne denenmesi gerektiği aşağıdaki **Deneme sürümü (2.0.0-test.3)** bölümündedir. **Normal kullanım:** Ultrahand menüsünden Kinestop panelini açın, noktaları açın ve paneli Ultrahand açma kombinasyonuyla *gizleyin*; noktalar geri gelir. Kombinasyona tekrar basınca panel görünür (noktalar duraklatılır). Panelden **B** ile çıkarsanız (Ultrahand menüsüne dönüş) noktalar duraklatılmış kalır, böylece menü görünür kalır; geri getirmek için Kinestop'u tekrar açıp kombinasyonla gizleyin. Panelde canlı tanılama bilgisi gösterilir ve `SD:/config/kinestop/sysmodule.log` dosyasına yazılır. Kararlı, yalnızca overlay'den oluşan sürüm için [orijinal sürüme](https://github.com/sertay1/Kinestop/releases) bakın.
+> **Upgrading from an earlier 2.0.0 test build:** delete the folder `SD:/atmosphere/contents/4200000000001042/` (the old sysmodule, including its `flags/boot2.flag`) and, if you like, `SD:/config/kinestop/sysmodule.log`, then reboot. Your `config.ini` is kept; the old test-build `debug_flags` setting in it is ignored.
+>
+> **Durum:** **2.0.0-test.5** bir **deneme sürümüdür** ve henüz konsolda test edilmedi. Önceki 2.0.0 deneme sürümleri noktaları ayrı bir sistem modülüyle (sysmodule) çiziyordu; konsol testleri, Switch'in bu katmanı bir overlay menüsüyle hiçbir zaman aynı anda göstermediğini ortaya koydu, bu yüzden o tasarımdan vazgeçildi. Bu sürüm orijinal gibi tek bir overlay'e geri döner, ama varsayılan 4MB belleğe sığar. Ne denenmesi gerektiği aşağıdaki **Deneme sürümü (2.0.0-test.5)** bölümündedir. Kararlı sürüm için [orijinal sürüme](https://github.com/sertay1/Kinestop/releases) bakın.
+>
+> **Önceki bir 2.0.0 deneme sürümünden geçiyorsanız:** `SD:/atmosphere/contents/4200000000001042/` klasörünü (eski sistem modülü ve içindeki `flags/boot2.flag` dosyası) ve isterseniz `SD:/config/kinestop/sysmodule.log` dosyasını silin, ardından konsolu yeniden başlatın. `config.ini` dosyanız korunur; içindeki eski `debug_flags` ayarı yok sayılır.
 
 ---
 
@@ -44,11 +52,12 @@
 ### ✨ Features
 * **Prevents Motion Sickness:** Floating motion cues (up to 60 FPS) sync with physical movement to eliminate nausea.
 * **Universal Compatibility:** Works across all games and the Switch Home Menu.
-* **Runs in the Background:** Dots keep showing after you close the overlay, and other overlays (e.g. Status Monitor) can be opened at the same time.
+* **Default 4MB Is Enough:** No Ultrahand memory change needed.
 * **Free Floating Mode:** Dots can drift naturally beyond screen edges for an authentic horizon view.
 * **Visual Customization:** 12 color themes, 6 placement patterns, dot size, and opacity options.
 * **Adjustable Sensitivity:** 10 sensitivity levels (0.2x - 6.0x) with hand tremor smoothing.
 * **Zero Calibration:** Lock your current holding angle as the center horizon with one click.
+* **Console Motion Sensor (optional):** Lets the dots move at the HOME menu too (off by default).
 * **Show in Screenshots/Videos (optional):** Choose whether the dots appear in screenshots and video captures (off by default).
 * **Language Support:** English and Turkish language support.
 
@@ -57,11 +66,13 @@
 </div>
 
 ### 🧩 Step 1: How It Works
-Kinestop is made of two parts:
-* **A background sysmodule** that reads the motion sensors and draws the dots on its own display layer. It draws at 640×360 and the Switch's display hardware scales that up to full screen, so it only uses **about 1.5 MB of system memory, and only while the dots are on**. When you turn the dots off, the sysmodule exits and frees that memory.
-* **An overlay** (`kinestop.ovl`) that is just the control panel: turn the dots on/off, pick colors, patterns and sensitivity, and calibrate.
+Kinestop is a single overlay (`kinestop.ovl`) with two modes:
+* **Settings panel:** the normal Kinestop menu, where you turn the dots on and pick colors, patterns, sensitivity and so on.
+* **Dots:** a transparent full-screen layer that shows only the dots. Your game keeps full control of the buttons and the touch screen.
 
-Because the overlay no longer draws anything, **it works with Ultrahand's default 4MB overlay memory** – no settings change needed – and **you can use other overlays while the dots are showing**.
+The dots are drawn at 640×360 and the Switch's display hardware scales them up to full screen, so **Kinestop works with Ultrahand's default 4MB overlay memory**.
+
+The Switch can show only **one overlay at a time**. While the Kinestop panel, the Ultrahand menu or another overlay (e.g. Status Monitor) is open, the dots are not shown.
 
 *Coming from Kinestop 1.x?* You can set Ultrahand's **Overlay Memory** back to **4MB**. Your existing `config.ini` is kept.
 
@@ -69,7 +80,7 @@ Because the overlay no longer draws anything, **it works with Ultrahand's defaul
 **Requirements:** You MUST have [nx-ovlloader](https://github.com/ppkantorski/nx-ovlloader) and [Ultrahand-Overlay](https://github.com/ppkantorski/Ultrahand-Overlay) installed for this app to work!
 
 **Method 1: Homebrew App Store (Automatic Installation)**
-The HB App Store currently provides the **original upstream version by SertAy** (overlay-only, requires the 8MB Ultrahand memory setting), not this modified version.
+The HB App Store currently provides the **original upstream version by SertAy** (requires the 8MB Ultrahand memory setting), not this modified version.
 
 <div align="center">
    <a href="https://hb-app.store/switch/Kinestop">
@@ -80,72 +91,55 @@ The HB App Store currently provides the **original upstream version by SertAy** 
 <br>
 
 **Method 2: Manual Installation**
-Download the `Kinestop.zip` release of this version (or build it yourself, see *Building from source* below), extract it and drag all the contents directly to the root of your SD card. The files are already placed in their correct folder paths:
-* `SD:/atmosphere/contents/4200000000001042/exefs.nsp` – the dot-drawing sysmodule
-* `SD:/atmosphere/contents/4200000000001042/toolbox.json` – lets sysmodule managers (e.g. ovl-sysmodules) list, start and stop it; a start from there always shows the dots, whatever the Kinestop toggle was last set to
-* `SD:/switch/.overlays/kinestop.ovl` – the settings overlay
+Download the `Kinestop.zip` release of this version (or build it yourself, see *Building from source* below), extract it and drag all the contents directly to the root of your SD card. It contains a single file, already in its correct folder: `SD:/switch/.overlays/kinestop.ovl`.
 
-No reboot is needed after installing. Your settings are stored in `SD:/config/kinestop/config.ini`, which is created automatically; the release does not include one, so updating never resets your settings.
+No reboot is needed after installing (unless you are removing an earlier 2.0.0 test build, see above). Your settings are stored in `SD:/config/kinestop/config.ini`, which is created automatically; the release does not include one, so updating never resets your settings.
 
 ### 🎮 Step 3: How to Use
-1. **Open UltraHand:** While in-game, swipe from the left edge or press **L + R + D-Pad Down + Right Stick**.
-2. **Launch Kinestop:** Select Kinestop from the overlay list.
-3. **Turn on the dots:** The **Enable Motion Dots** toggle starts the background sysmodule; turning it off stops it and frees its memory.
-4. **Configure:** Choose your preferred color, pattern, size, opacity and sensitivity. Changes apply live and are saved automatically.
-5. **Play:** Press **(B)** to close the menu. **The dots keep running after the overlay is closed**, and you can open other overlays while they are on.
+1. **Open UltraHand:** While in-game, swipe from the left edge or press the Ultrahand key combo (**ZL + ZR + D-Pad Down** by default).
+2. **Launch Kinestop:** Select Kinestop from the overlay list. The settings panel opens.
+3. **Turn on the dots:** Enable **Enable Motion Dots**.
+4. **Configure:** Choose your preferred color, pattern, size, opacity and sensitivity. Changes are saved automatically. The dots are not shown while the panel is open: press **(B)** to see your changes. Hold the console the way you play and use **Calibrate Zero Position** to set the center.
+5. **Play:** Press **(B)**. Kinestop switches to the dots and you are back in your game.
+6. **Change settings:** Press the Ultrahand key combo (**ZL + ZR + D-Pad Down** by default, or the combo you set in Ultrahand). The Kinestop settings panel opens; press **(B)** again to go back to the dots. (Swiping from the left edge does not work while the dots are shown.)
+7. **Turn the dots off:** Open the settings panel with the combo, turn **Enable Motion Dots** off and press **(B)**. Kinestop closes and you are back in the Ultrahand menu.
 
-**Start at boot (optional):** If you want the dots without opening the overlay after every reboot, enable **Start Dots at Boot** in Kinestop's settings; the dots then start at every boot, even if you switched them off before shutting down. This creates `atmosphere/contents/4200000000001042/flags/boot2.flag`. It is off by default because boot-time sysmodules share a limited memory pool – see Troubleshooting if your console fails to boot afterwards.
+**Other overlays:** opening another overlay (for example with its own key combo) replaces the dots. To get them back, open Kinestop again and press **(B)**. To reach the Ultrahand menu without turning the dots off, select **Ultrahand Menu** in the panel.
 
-**Status line:** the top of the overlay shows what the sysmodule is doing:
-* **Running** – the dots are being drawn.
-* **Stopped** – the sysmodule is not running (dots off).
-* **Starting...** / **Stopping...** – the overlay has launched the sysmodule and is waiting for it to answer.
-* **Running - no sensor data** – running, but no motion sensor readings yet (normal for a moment after starting).
-* **Error** – a stage name (VI init, Display, Layer, Layer stack, NWindow, Framebuffer, Sensor) and an error code `2xxx-xxxx`. It clears by itself once that stage recovers. Please include these when reporting a problem.
-* **API mismatch** – the overlay and the sysmodule are from different releases; copy both files from the same release.
+**Motion Dots launch mode:** Kinestop registers a **Motion Dots** launch mode with Ultrahand (in Kinestop's overlay settings in Ultrahand, under launch modes). It starts the dots directly and can be given its own key combo. If **Enable Motion Dots** is off, it opens the settings panel instead.
 
-The sysmodule writes a log to `SD:/config/kinestop/sysmodule.log`, which is the most useful thing to attach to a bug report.
+**Console Motion Sensor:** the motion sensor normally used by Kinestop does not report movement while you are at the HOME menu, so the dots stand still there. Turning on **Console Motion Sensor** adds a second sensor that keeps working at the HOME menu, but it updates more slowly (the dots move in small steps) and uses 512 KB of overlay memory. It is off by default.
 
 ### 🛠️ Troubleshooting
-* **The status line shows an error / no dots appear:** note the stage and error code, turn the dots off and on again, and check `SD:/config/kinestop/sysmodule.log`.
-* **Status stays on "Stopped", "Starting..." or "Start failed":** make sure `exefs.nsp` is in `SD:/atmosphere/contents/4200000000001042/` and that your Atmosphère is up to date. Other sysmodules using a lot of memory can also prevent it from starting; try disabling some.
-* **Console fails to boot with error 2001-0132 after enabling Start Dots at Boot:** too many boot-time sysmodules are competing for system memory. Put the SD card in a PC and delete `SD:/atmosphere/contents/4200000000001042/flags/boot2.flag` (or disable other sysmodules). Kinestop works fine started from the overlay instead.
+* **The dots do not move at the HOME menu:** this is normal; turn on **Console Motion Sensor** if you want them to.
+* **The dots disappear when I open another overlay:** this is normal, the Switch shows only one overlay at a time. Open Kinestop and press **(B)** to bring them back.
 * **Dots are missing from screenshots or videos:** enable **Show in Screenshots/Videos**. (Leave it off if you want clean captures.)
-* **"API mismatch":** you have mixed files from different releases; reinstall all three files from one release.
-* **Removing Kinestop:** turn the dots off, then delete `SD:/atmosphere/contents/4200000000001042/`, `SD:/switch/.overlays/kinestop.ovl` and (optionally) `SD:/config/kinestop/`.
+* **Kinestop crashes or does not open:** make sure the folder `SD:/atmosphere/contents/4200000000001042/` from an earlier 2.0.0 test build is deleted, and that nx-ovlloader and Ultrahand are up to date.
+* **Ultrahand notifications look large while the dots are shown:** known cosmetic issue of the 640×360 dots layer; they look normal again in the panel and the Ultrahand menu.
+* **Removing Kinestop:** delete `SD:/switch/.overlays/kinestop.ovl` and (optionally) `SD:/config/kinestop/` and the `[kinestop.ovl]` section of `SD:/config/ultrahand/overlays.ini`.
 
-### 🧪 Test build (2.0.0-test.3)
-The Kinestop panel has a **Diagnostics (test build)** section with these toggles. They are saved in `config.ini` as `debug_flags` (the sum of the values below), so they can also be set from a PC:
+### 🧪 Test build (2.0.0-test.5)
+Please set Ultrahand's **Overlay Memory** to **4MB** before testing, and delete the old sysmodule folder (see the top of this page). Then check, in handheld mode and docked if you can:
+1. **Panel:** the Kinestop panel opens and every setting works, including the language switch.
+2. **Dots:** turn the dots on and press **B**. Do the dots cover the whole screen? Do they move smoothly in a game? Does the game get all buttons and touches?
+3. **Back to the panel:** press the Ultrahand combo (ZL + ZR + D-Pad Down by default). Does the Kinestop panel open? Press **B**: do the dots come back? Select **Ultrahand Menu**: does the Ultrahand menu open?
+4. **Dots off:** turn the dots off in the panel and press **B**. Does the Ultrahand menu appear (also when Kinestop was opened with a key combo)?
+5. **HOME menu:** with **Console Motion Sensor** off the dots should stand still at the HOME menu; with it on they should move (in steps).
+6. **Sleep:** with the dots on (try both with **Console Motion Sensor** on and off), press the Power button to sleep and wake the console. Does anything crash? Are the dots still there?
+7. **Other overlays:** with the dots on, open another overlay (e.g. Status Monitor) with its own combo, then close it. What happens?
+8. **Captures:** take a screenshot with **Show in Screenshots/Videos** off and on.
+9. **Launch mode:** start **Motion Dots** from Kinestop's launch modes in Ultrahand (and, if you like, give it a key combo). Do the dots start? Do Ultrahand notifications that appear while the dots are shown look right?
 
-| Toggle | `debug_flags` | What it does |
-|---|---|---|
-| Blink test | 1 | Dots off 3 s out of every 10 s. |
-| Unscaled test layer | 2 | Layer mode **Quarter 1x**: the 640×360 image at 1:1 in the top-left quarter of the screen (the whole pattern at half size). |
-| Verbose log | 4 | One diagnostics line per second in `sysmodule.log`. |
-| Keep dots while menus open (coexistence test) | 8 | The dots are **not** paused for the Kinestop panel or the Ultrahand menu. |
-| Small 2x-scaled test layer | 16 | Layer mode **Quarter 2x**: a 320×180 image scaled 2x into the top-left quarter. If both layer toggles are on, *Unscaled* wins. |
-
-With both layer toggles off the layer mode is **Full screen 2x** (the default): the 640×360 image scaled 2x to fill the screen. The first line of the diagnostics block (`Layer: ...`) shows the mode in use.
-
-**test.3 checklist.** Turn **Verbose log** on and **Blink test** off, and turn the dots on. Then, for each layer mode (**Full screen 2x**, **Quarter 1x**, **Quarter 2x**):
-1. Pick the layer mode, then turn **Keep dots while menus open** ON (leave it on for the next modes). Note whether **the panel** stays visible and whether **the dots** appear next to it (in the top-left quarter for the two Quarter modes).
-2. Hide the panel with the combo and check that the dots move smoothly.
-3. Open the Kinestop panel again with the combo. Note whether the panel and the dots are both visible.
-4. Press **B**. Note whether **the Ultrahand menu** appears, and whether the dots are visible with it.
-5. If you have **Status Monitor**, open it from the Ultrahand menu and note whether it and the dots are both visible.
-6. Close the menus and note whether the dots are still there.
-
-If a menu disappears, wait a few seconds; if it does not come back, **reboot**. With **Start Dots at Boot** off the dots stay off after the reboot, so you can open Kinestop and change the layer mode before turning the dots on again. *Keep dots while menus open* **stays on after a reboot**: turn it off in the panel before turning the dots on. If **Start Dots at Boot** is on (the dots are back, and opening the panel repeats the test) or the panel cannot be reached, set `debug_flags` in `SD:/config/kinestop/config.ini` to `4` from a PC.
-
-Please report, per layer mode: panel visible? dots with the panel? Ultrahand menu after B? dots with the Ultrahand menu? Status Monitor? dots smooth? Attach `SD:/config/kinestop/sysmodule.log` (copy it before the next start of the dots, it is cleared then).
+Please report what you saw for each step, plus your HOS, Atmosphère and Ultrahand versions.
 
 ### 🔧 Building from source
-Requires [devkitPro](https://devkitpro.org/wiki/Getting_Started) with the `switch-dev` package (libnx) and Python 3.
+Requires [devkitPro](https://devkitpro.org/wiki/Getting_Started) with the `switch-dev` package (libnx), Python 3 and a host C++20 compiler for the tests.
 ```sh
-make          # builds sysmodule/out/kinestop.nsp and overlay/kinestop.ovl
+make          # builds overlay/kinestop.ovl
 make dist     # lays out an SD-card-ready tree in sdcard/
 make zip      # same, plus Kinestop.zip
-make test     # host-side tests (if present)
+make test     # host-side tests (no devkitPro needed)
+make clean
 ```
 
 ---
@@ -165,11 +159,12 @@ make test     # host-side tests (if present)
 ### ✨ Özellikler
 * **Taşıt Tutmasını Önleme:** Fiziksel hareketle senkronize hareket noktalarıyla (60 FPS'ye kadar) mide bulantısını engeller.
 * **Tüm Oyunlarla Uyumlu:** Bütün oyunlarda ve Switch Ana Menüsünde çalışır.
-* **Arka Planda Çalışır:** Overlay'i kapattıktan sonra da noktalar ekranda kalır; aynı anda başka overlay'leri (ör. Status Monitor) de açabilirsiniz.
+* **Varsayılan 4MB Yeterli:** UltraHand bellek ayarını değiştirmenize gerek yoktur.
 * **Serbest Hareket Modu:** Noktaların pencereden bakar gibi ekran dışına doğal süzülmesini sağlar.
 * **Görsel Kişiselleştirme:** 12 renk teması, 6 yerleşim şablonu, boyut ve saydamlık seçenekleri.
 * **Hassasiyet Ayarı:** 10 kademeli hassasiyet (0.2x - 6.0x) ve el titremesini filtreleme desteği.
 * **Sıfır Noktası Kalibrasyonu:** Konsolu tuttuğunuz açıyı tek tuşla merkez ufuk seviyesi yapar.
+* **Konsol Hareket Sensörü (isteğe bağlı):** Noktaların Ana Menüde de hareket etmesini sağlar (varsayılan: kapalı).
 * **Görüntü ve Kayıtlarda Göster (isteğe bağlı):** Noktaların ekran görüntülerinde ve video kayıtlarında görünüp görünmeyeceğini seçin (varsayılan: kapalı).
 * **Dil Desteği:** Türkçe ve İngilizce dil desteği.
 
@@ -178,11 +173,13 @@ make test     # host-side tests (if present)
 </div>
 
 ### 🧩 1. Aşama: Nasıl Çalışır?
-Kinestop iki parçadan oluşur:
-* **Arka planda çalışan bir sistem modülü (sysmodule):** Hareket sensörlerini okur ve noktaları kendi ekran katmanına çizer. Çizimi 640×360 çözünürlükte yapar, Switch'in ekran donanımı bunu tam ekrana büyütür. Bu sayede **yalnızca noktalar açıkken, yaklaşık 1,5 MB sistem belleği** kullanır. Noktaları kapattığınızda modül kapanır ve bu belleği geri bırakır.
-* **Bir overlay** (`kinestop.ovl`): Yalnızca kontrol panelidir. Noktaları açıp kapatır, renk, şablon ve hassasiyet seçmenizi ve kalibrasyon yapmanızı sağlar.
+Kinestop, iki modu olan tek bir overlay'dir (`kinestop.ovl`):
+* **Ayar paneli:** Noktaları açtığınız, renk, şablon, hassasiyet gibi ayarları seçtiğiniz bildiğimiz Kinestop menüsü.
+* **Noktalar:** Yalnızca noktaları gösteren, tam ekran ve saydam bir katman. Tuşlar ve dokunmatik ekran tamamen oyunda kalır.
 
-Overlay artık çizim yapmadığı için **UltraHand'in varsayılan 4MB overlay belleğiyle çalışır** (herhangi bir ayar değiştirmeniz gerekmez) ve **noktalar açıkken başka overlay'leri de kullanabilirsiniz.**
+Noktalar 640×360 çözünürlükte çizilir ve Switch'in ekran donanımı bunları tam ekrana büyütür. Bu sayede **Kinestop, UltraHand'in varsayılan 4MB overlay belleğiyle çalışır.**
+
+Switch aynı anda **yalnızca bir overlay** gösterebilir. Kinestop paneli, UltraHand menüsü ya da başka bir overlay (ör. Status Monitor) açıkken noktalar görünmez.
 
 *Kinestop 1.x'ten mi geçiyorsunuz?* UltraHand'deki **Overlay Memory** ayarını tekrar **4MB**'a düşürebilirsiniz. Mevcut `config.ini` dosyanız korunur.
 
@@ -190,7 +187,7 @@ Overlay artık çizim yapmadığı için **UltraHand'in varsayılan 4MB overlay 
 **Zorunlu Gereksinimler:** Uygulamanın çalışması için cihazınızda [nx-ovlloader](https://github.com/ppkantorski/nx-ovlloader) ve [Ultrahand-Overlay](https://github.com/ppkantorski/Ultrahand-Overlay) yüklü olmak ZORUNDADIR!
 
 **Yöntem 1: Homebrew App Store (Otomatik Kurulum)**
-HB App Store'da şu an bu değiştirilmiş sürüm değil, **SertAy'ın orijinal sürümü** bulunmaktadır (yalnızca overlay, UltraHand bellek ayarının 8MB yapılmasını gerektirir).
+HB App Store'da şu an bu değiştirilmiş sürüm değil, **SertAy'ın orijinal sürümü** bulunmaktadır (UltraHand bellek ayarının 8MB yapılmasını gerektirir).
 
 <div align="center">
    <a href="https://hb-app.store/switch/Kinestop">
@@ -201,52 +198,55 @@ HB App Store'da şu an bu değiştirilmiş sürüm değil, **SertAy'ın orijinal
 <br>
 
 **Yöntem 2: Manuel Kurulum**
-Bu sürümün `Kinestop.zip` dosyasını indirin (ya da aşağıdaki *Kaynak koddan derleme* bölümüne göre kendiniz derleyin), bilgisayarda çıkartın ve çıkan tüm dosyaları doğrudan SD kartınızın ana dizinine sürükleyip bırakın. Dosyalar zaten doğru klasörlerdedir:
-* `SD:/atmosphere/contents/4200000000001042/exefs.nsp` – noktaları çizen sistem modülü
-* `SD:/atmosphere/contents/4200000000001042/toolbox.json` – sysmodule yöneticilerinin (ör. ovl-sysmodules) modülü listelemesini, başlatmasını ve durdurmasını sağlar; oradan başlatıldığında Kinestop anahtarının son durumundan bağımsız olarak noktalar her zaman görünür
-* `SD:/switch/.overlays/kinestop.ovl` – ayar overlay'i
+Bu sürümün `Kinestop.zip` dosyasını indirin (ya da aşağıdaki *Kaynak koddan derleme* bölümüne göre kendiniz derleyin), bilgisayarda çıkartın ve çıkan tüm dosyaları doğrudan SD kartınızın ana dizinine sürükleyip bırakın. Pakette doğru klasöre yerleştirilmiş tek bir dosya vardır: `SD:/switch/.overlays/kinestop.ovl`.
 
-Kurulumdan sonra yeniden başlatmanız gerekmez. Ayarlarınız otomatik oluşturulan `SD:/config/kinestop/config.ini` dosyasında saklanır. Sürüm paketinde bu dosya bulunmadığı için güncelleme yaptığınızda ayarlarınız sıfırlanmaz.
+Kurulumdan sonra yeniden başlatmanız gerekmez (önceki bir 2.0.0 deneme sürümünü kaldırıyorsanız yukarıya bakın). Ayarlarınız otomatik oluşturulan `SD:/config/kinestop/config.ini` dosyasında saklanır. Sürüm paketinde bu dosya bulunmadığı için güncelleme yaptığınızda ayarlarınız sıfırlanmaz.
 
 ### 🎮 3. Aşama: Uygulamanın Kullanımı
-1. **UltraHand'i Açın:** Ekranın sol kenarından sağa kaydırarak veya **L + R + D-Pad Aşağı + Sağ Analog** kısayoluyla UltraHand'i açın.
-2. **Kinestop'u Başlatın:** Listeden Kinestop'u seçin.
-3. **Noktaları Açın:** **Hareket Noktalarını Aç** anahtarı arka plandaki modülü başlatır; kapattığınızda modül durur ve belleği boşaltır.
-4. **Ayarlayın:** İstediğiniz rengi, yerleşim şablonunu, boyutu, saydamlığı ve hassasiyeti belirleyin. Değişiklikler anında uygulanır ve otomatik kaydedilir.
-5. **Oyuna Dönün:** **(B)** tuşuna basarak menüyü kapatın. **Overlay kapandıktan sonra da noktalar çalışmaya devam eder** ve bu sırada başka overlay'leri açabilirsiniz.
+1. **UltraHand'i Açın:** Ekranın sol kenarından sağa kaydırarak veya UltraHand kısayoluyla (varsayılan: **ZL + ZR + D-Pad Aşağı**) UltraHand'i açın.
+2. **Kinestop'u Başlatın:** Listeden Kinestop'u seçin. Ayar paneli açılır.
+3. **Noktaları Açın:** **Hareket Noktalarını Aç** seçeneğini açın.
+4. **Ayarlayın:** İstediğiniz rengi, yerleşim şablonunu, boyutu, saydamlığı ve hassasiyeti belirleyin. Değişiklikler otomatik kaydedilir. Panel açıkken noktalar görünmez: değişiklikleri görmek için **(B)** tuşuna basın. Konsolu oynadığınız gibi tutup **Sıfır Noktasını Kalibre Et** ile merkezi belirleyin.
+5. **Oyuna Dönün:** **(B)** tuşuna basın. Kinestop noktalara geçer ve oyununuza dönersiniz.
+6. **Ayarları Değiştirin:** UltraHand kısayoluna basın (varsayılan: **ZL + ZR + D-Pad Aşağı** ya da UltraHand'de ayarladığınız kısayol). Kinestop ayar paneli açılır; noktalara dönmek için yine **(B)** tuşuna basın. (Noktalar ekrandayken sol kenardan kaydırma çalışmaz.)
+7. **Noktaları Kapatın:** Kısayolla ayar panelini açın, **Hareket Noktalarını Aç** seçeneğini kapatın ve **(B)** tuşuna basın. Kinestop kapanır ve UltraHand menüsüne dönersiniz.
 
-**Açılışta Başlat (isteğe bağlı):** Her yeniden başlatmadan sonra overlay'i açmadan noktaların gelmesini istiyorsanız Kinestop ayarlarından **Açılışta Noktaları Başlat** seçeneğini etkinleştirin; kapatmadan önce noktaları kapatmış olsanız bile noktalar her açılışta başlar. Bu seçenek `atmosphere/contents/4200000000001042/flags/boot2.flag` dosyasını oluşturur. Açılışta başlayan sistem modülleri sınırlı bir bellek havuzunu paylaştığı için varsayılan olarak kapalıdır; konsolunuz bundan sonra açılmazsa Sorun Giderme bölümüne bakın.
+**Diğer overlay'ler:** Başka bir overlay açtığınızda (ör. kendi kısayoluyla) noktaların yerini o alır. Noktaları geri getirmek için Kinestop'u yeniden açıp **(B)** tuşuna basın. Noktaları kapatmadan UltraHand menüsüne gitmek için paneldeki **Ultrahand Menüsü** seçeneğini kullanın.
 
-**Durum satırı:** Overlay'in üst kısmı modülün ne yaptığını gösterir:
-* **Çalışıyor** – noktalar çiziliyor.
-* **Durduruldu** – modül çalışmıyor (noktalar kapalı).
-* **Başlatılıyor...** / **Durduruluyor...** – overlay modülü başlattı ve yanıt bekliyor.
-* **Çalışıyor - sensör verisi yok** – modül çalışıyor ama henüz hareket sensöründen veri gelmedi (başlatmadan hemen sonra kısa süre normaldir).
-* **Hata** – bir aşama adı (VI init, Display, Layer, Layer stack, NWindow, Framebuffer, Sensör) ve `2xxx-xxxx` biçiminde bir hata kodu. O aşama düzelince kendiliğinden kaybolur. Sorun bildirirken lütfen bunları da ekleyin.
-* **API uyumsuz** – overlay ile modül farklı sürümlerden; iki dosyayı da aynı sürümden kopyalayın.
+**Motion Dots başlatma modu:** Kinestop, UltraHand'e bir **Motion Dots** başlatma modu ekler (UltraHand'de Kinestop'un overlay ayarlarında, başlatma modları altında). Bu mod noktaları doğrudan başlatır ve ona ayrı bir kısayol atanabilir. **Hareket Noktalarını Aç** kapalıysa bunun yerine ayar paneli açılır.
 
-Modül `SD:/config/kinestop/sysmodule.log` dosyasına bir günlük yazar. Hata bildirirken eklenecek en faydalı dosya budur.
+**Konsol Hareket Sensörü:** Kinestop'un normalde kullandığı hareket sensörü Ana Menüdeyken hareket bildirmez, bu yüzden noktalar orada sabit kalır. **Konsol Hareket Sensörü** seçeneği, Ana Menüde de çalışan ikinci bir sensörü devreye sokar; ancak bu sensör daha seyrek güncellenir (noktalar küçük adımlarla hareket eder) ve 512 KB overlay belleği kullanır. Varsayılan olarak kapalıdır.
 
 ### 🛠️ Sorun Giderme
-* **Durum satırında hata var / noktalar görünmüyor:** Aşama adını ve hata kodunu not edin, noktaları kapatıp tekrar açın ve `SD:/config/kinestop/sysmodule.log` dosyasına bakın.
-* **Durum "Durduruldu", "Başlatılıyor..." ya da "Başlatılamadı" olarak kalıyor:** `exefs.nsp` dosyasının `SD:/atmosphere/contents/4200000000001042/` klasöründe olduğundan ve Atmosphère'in güncel olduğundan emin olun. Çok bellek kullanan başka sistem modülleri de başlamasını engelleyebilir; bazılarını kapatmayı deneyin.
-* **Açılışta Noktaları Başlat'ı açtıktan sonra konsol 2001-0132 hatasıyla açılmıyor:** Açılışta başlayan modüller sistem belleğine sığmıyor. SD kartı bilgisayara takıp `SD:/atmosphere/contents/4200000000001042/flags/boot2.flag` dosyasını silin (ya da başka modülleri kapatın). Kinestop'u overlay'den başlatmak sorunsuz çalışır.
+* **Noktalar Ana Menüde hareket etmiyor:** Bu normaldir; hareket etmelerini istiyorsanız **Konsol Hareket Sensörü** seçeneğini açın.
+* **Başka bir overlay açınca noktalar kayboluyor:** Bu normaldir, Switch aynı anda yalnızca bir overlay gösterebilir. Geri getirmek için Kinestop'u açıp **(B)** tuşuna basın.
 * **Noktalar ekran görüntülerinde veya videolarda görünmüyor:** **Görüntü ve Kayıtlarda Göster** seçeneğini açın. (Temiz kayıt istiyorsanız kapalı bırakın.)
-* **"API uyumsuz":** Farklı sürümlerin dosyaları karışmış; üç dosyayı da aynı sürümden yeniden kurun.
-* **Kinestop'u kaldırma:** Noktaları kapatın, ardından `SD:/atmosphere/contents/4200000000001042/`, `SD:/switch/.overlays/kinestop.ovl` ve (isteğe bağlı olarak) `SD:/config/kinestop/` yollarını silin.
+* **Kinestop çöküyor ya da açılmıyor:** Önceki bir 2.0.0 deneme sürümünden kalan `SD:/atmosphere/contents/4200000000001042/` klasörünün silindiğinden, nx-ovlloader ve UltraHand'in güncel olduğundan emin olun.
+* **Noktalar ekrandayken UltraHand bildirimleri büyük görünüyor:** 640×360 nokta katmanından kaynaklanan bilinen bir görüntü sorunudur; panelde ve UltraHand menüsünde normal görünürler.
+* **Kinestop'u kaldırma:** `SD:/switch/.overlays/kinestop.ovl` dosyasını, (isteğe bağlı olarak) `SD:/config/kinestop/` klasörünü ve `SD:/config/ultrahand/overlays.ini` dosyasındaki `[kinestop.ovl]` bölümünü silin.
 
-### 🧪 Deneme sürümü (2.0.0-test.3)
-Panelin **Tanılama (test sürümü)** bölümünde test ayarları vardır (`config.ini` içinde `debug_flags` olarak saklanır): **Yanıp sönme testi** (1), **Ölçeklenmemiş test katmanı** (2, Çeyrek 1x), **Ayrıntılı günlük** (4), **Menüler açıkken noktaları göster** (8), **Küçük 2x ölçekli test katmanı** (16, Çeyrek 2x). İki katman ayarı da kapalıysa mod **Tam ekran 2x**'tir (varsayılan).
+### 🧪 Deneme sürümü (2.0.0-test.5)
+Teste başlamadan önce UltraHand'in **Overlay Memory** ayarını **4MB** yapın ve eski sistem modülü klasörünü silin (bu sayfanın başına bakın). Ardından, el modunda ve mümkünse dock modunda şunları kontrol edin:
+1. **Panel:** Kinestop paneli açılıyor ve dil değiştirme dahil bütün ayarlar çalışıyor mu?
+2. **Noktalar:** Noktaları açıp **B**'ye basın. Noktalar bütün ekranı kaplıyor mu? Oyunda akıcı hareket ediyorlar mı? Bütün tuşlar ve dokunmalar oyuna gidiyor mu?
+3. **Panele dönüş:** UltraHand kısayoluna basın (varsayılan: ZL + ZR + D-Pad Aşağı). Kinestop paneli açılıyor mu? **B**'ye basınca noktalar geri geliyor mu? **Ultrahand Menüsü**'nü seçince UltraHand menüsü açılıyor mu?
+4. **Noktalar kapalı:** Panelden noktaları kapatıp **B**'ye basın. UltraHand menüsü görünüyor mu (Kinestop bir kısayolla açıldığında da)?
+5. **Ana Menü:** **Konsol Hareket Sensörü** kapalıyken noktalar Ana Menüde sabit kalmalı; açıkken (adım adım) hareket etmeli.
+6. **Uyku modu:** Noktalar açıkken (**Konsol Hareket Sensörü** hem açık hem kapalıyken deneyin) Güç tuşuyla konsolu uyutup uyandırın. Bir çökme oluyor mu? Noktalar hâlâ ekranda mı?
+7. **Diğer overlay'ler:** Noktalar açıkken başka bir overlay'i (ör. Status Monitor) kendi kısayoluyla açıp kapatın. Ne oluyor?
+8. **Kayıtlar:** **Görüntü ve Kayıtlarda Göster** kapalıyken ve açıkken birer ekran görüntüsü alın.
+9. **Başlatma modu:** UltraHand'de Kinestop'un başlatma modlarından **Motion Dots**'u başlatın (isterseniz bir kısayol da atayın). Noktalar başlıyor mu? Noktalar ekrandayken gelen UltraHand bildirimleri düzgün görünüyor mu?
 
-**test.3 kontrol listesi:** **Ayrıntılı günlük** açık, **Yanıp sönme testi** kapalı olsun. Her katman modunda (Tam ekran 2x, Çeyrek 1x, Çeyrek 2x) **Menüler açıkken noktaları göster** AÇIKKEN: paneli kombinasyonla gizleyip noktaların düzgün hareket ettiğini kontrol edin; Kinestop panelini açıp panelin ve noktaların görünüp görünmediğini not edin; **B**'ye basıp Ultrahand menüsünün görünüp görünmediğini not edin; varsa **Status Monitor**'ü de açın. Bir menü kaybolur ve birkaç saniyede geri gelmezse konsolu **yeniden başlatın**. **Açılışta Noktaları Başlat** kapalıysa noktalar yeniden başlatmadan sonra kapalı kalır; Kinestop'u açıp katman modunu değiştirdikten sonra noktaları yeniden açabilirsiniz. *Menüler açıkken noktaları göster* ayarı yeniden başlatmadan sonra da **açık kalır**: noktaları açmadan önce panelden kapatın. **Açılışta Noktaları Başlat** açıksa ya da panele ulaşamıyorsanız, bilgisayardan `SD:/config/kinestop/config.ini` dosyasındaki `debug_flags` değerini `4` yapın. Sonuçları ve `SD:/config/kinestop/sysmodule.log` dosyasını gönderin.
+Her adımda ne gördüğünüzü, HOS, Atmosphère ve UltraHand sürümlerinizle birlikte bildirin.
 
 ### 🔧 Kaynak koddan derleme
-`switch-dev` paketiyle (libnx) birlikte [devkitPro](https://devkitpro.org/wiki/Getting_Started) ve Python 3 gerekir.
+`switch-dev` paketiyle (libnx) birlikte [devkitPro](https://devkitpro.org/wiki/Getting_Started), Python 3 ve testler için bilgisayarda C++20 destekli bir derleyici gerekir.
 ```sh
-make          # sysmodule/out/kinestop.nsp ve overlay/kinestop.ovl dosyalarını derler
+make          # overlay/kinestop.ovl dosyasını derler
 make dist     # SD karta kopyalanmaya hazır dosya ağacını sdcard/ içine oluşturur
 make zip      # aynısı, ek olarak Kinestop.zip
-make test     # bilgisayarda çalışan testler (varsa)
+make test     # bilgisayarda çalışan testler (devkitPro gerekmez)
+make clean
 ```
 
 ---
@@ -271,4 +271,4 @@ Copyright (c) 2026 **SertAy**.
 This project is available for personal and non-commercial use with mandatory author attribution. Claiming authorship, unauthorized redistribution, or selling this software is strictly prohibited. Please see the [LICENSE](LICENSE) file for details.  
 This repository is a modified version of the original [Kinestop](https://github.com/sertay1/Kinestop); the modifications are listed at the top of this file.
 
-The sysmodule's IPC server code is adapted from [sys-clk](https://github.com/retronx-team/sys-clk) and keeps its original license header.
+The bundled [libultrahand](https://github.com/ppkantorski/libultrahand) (including libtesla) keeps its own GPL-2.0 license; the small Kinestop changes to it are marked `Kinestop patch`.

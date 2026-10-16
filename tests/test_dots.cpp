@@ -1,13 +1,13 @@
 // Kinestop host tests - common/dots.{hpp,cpp} against the original overlay.
 //
-// Part of the sysmodule/overlay split of the original Kinestop by SertAy
+// Part of a modified version of the original Kinestop by SertAy
 // (https://github.com/sertay1/Kinestop).
 //
 // The "original_*" code below is copied from SertAy's original overlay
 // (`git show main:overlay/source/main.cpp`): the option tables,
 // get_anchors() and the displacement math of draw_motion_dots(). Only the
 // tsl types were replaced by plain ones; the arithmetic is untouched. It is
-// the oracle the split version must reproduce exactly.
+// the oracle this version must reproduce exactly.
 
 #include <algorithm>
 #include <cmath>

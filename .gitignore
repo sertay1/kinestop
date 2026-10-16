@@ -1,14 +1,11 @@
 # build outputs
 build/
-out/
 *.elf
 *.nso
-*.npdm
+*.nro
 *.map
-*.nsp
 *.o
 *.d
-sysmodule/main
 
 # packaging (make dist / make zip)
 sdcard/
@@ -28,3 +25,6 @@ tests/test_*
 
 __pycache__/
 *.pyc
+
+# hardware test logs
+*.log

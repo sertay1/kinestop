@@ -1,5 +1,7 @@
 #---------------------------------------------------------------------------------
-# Kinestop overlay - settings/control panel for the Kinestop sysmodule.
+# Kinestop overlay - settings panel and full-screen motion-dot HUD in one
+# kinestop.ovl (two launch modes), sized for Ultrahand's default 4 MB
+# overlay memory.
 # Modified version of the original Kinestop by SertAy
 # (https://github.com/sertay1/Kinestop).
 #---------------------------------------------------------------------------------
@@ -15,7 +17,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE       := Kinestop
 APP_AUTHOR      := Kinestop
-APP_VERSION     := 2.0.0-test.4
+APP_VERSION     := 2.0.0-test.5
 
 TARGET          := kinestop
 BUILD           := build
@@ -27,10 +29,13 @@ NO_ICON         := 1
 
 ARCH    := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
-CFLAGS  := -g -Wall -O2 -ffunction-sections -fdata-sections $(ARCH) $(DEFINES)
+# -Os, no RTTI and no unwind tables (as Ultrahand itself builds): the NRO is
+# loaded into the 4 MB overlay heap, so every byte of image is a byte less
+# for framebuffers. ~190 KB smaller than -O2.
+CFLAGS  := -g -Wall -Os -ffunction-sections -fdata-sections $(ARCH) $(DEFINES)
 CFLAGS  += $(INCLUDE) -D__SWITCH__
 
-CXXFLAGS := $(CFLAGS) -fno-exceptions -std=c++20
+CXXFLAGS := $(CFLAGS) -fno-exceptions -fno-rtti -fno-unwind-tables -fno-asynchronous-unwind-tables -std=c++20
 
 ASFLAGS := -g $(ARCH)
 LDFLAGS = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,--gc-sections

@@ -1,7 +1,7 @@
 #pragma once
 
-// Motion-cue dot layout shared by the sysmodule (which draws the dots) and the
-// overlay (which only needs the option tables for its menus).
+// Motion-cue dot layout: the option tables for the settings menu and the
+// anchor/offset math the HUD draws from.
 // Ported from the original overlay's draw_motion_dots()/get_anchors() by SertAy.
 
 #include <cstddef>
@@ -11,8 +11,8 @@
 
 namespace kinestop::dots {
 
-// All layout math is in a 1280x720 logical screen. The sysmodule scales it
-// down to its framebuffer; VI scales the framebuffer back up to full screen.
+// All layout math is in a 1280x720 logical screen. The HUD scales it down to
+// its 640x360 framebuffer; VI scales the framebuffer back up to full screen.
 constexpr float LOGICAL_WIDTH  = 1280.0f;
 constexpr float LOGICAL_HEIGHT = 720.0f;
 

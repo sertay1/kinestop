@@ -1,9 +1,8 @@
-// Kinestop host tests - sysmodule/source/frame_scale.hpp: logical
-// (1280x720) px to framebuffer px for each LayerMode framebuffer, i.e.
-// fb_scale 0.5 (640x360: Full2x, Quarter1x) and 0.25 (320x180: Quarter2x,
-// KINESTOP_DEBUG_SCALED_SMALL).
+// Kinestop host tests - overlay/source/frame_scale.hpp: logical
+// (1280x720) px to framebuffer px, i.e. fb_scale 0.5 (the 640x360 HUD
+// framebuffer) and 0.25 (a 320x180 framebuffer).
 //
-// Part of the sysmodule/overlay split of the original Kinestop by SertAy
+// Part of a modified version of the original Kinestop by SertAy
 // (https://github.com/sertay1/Kinestop).
 
 #include <cmath>
@@ -20,8 +19,8 @@ namespace dots = kinestop::dots;
 namespace {
 
 struct Fb { uint32_t w, h; };
-constexpr Fb FULL = {640, 360};   // Renderer::FB_WIDTH x FB_HEIGHT
-constexpr Fb SMALL = {320, 180};  // Renderer::SMALL_FB_WIDTH x SMALL_FB_HEIGHT
+constexpr Fb FULL = {640, 360};   // the HUD framebuffer
+constexpr Fb SMALL = {320, 180};  // a quarter-size framebuffer
 
 void test_scale_factors() {
     static_assert(fs::LOGICAL_WIDTH == dots::LOGICAL_WIDTH, "logical width");
@@ -86,7 +85,7 @@ void test_offset_quantization() {
     CHECK_EQ(fs::dequantize_offset(1, 0.25f), 1.0f);
 }
 
-// Every anchor of every style/density, clamped the way build_frame() does
+// Every anchor of every style/density, clamped the way hud::dot_center() does
 // when not free floating, lands inside the framebuffer at both scales, and
 // the 0.25 centre is exactly half the 0.5 one.
 void test_centers_inside() {

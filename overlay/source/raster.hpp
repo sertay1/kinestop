@@ -1,7 +1,7 @@
-// Kinestop sysmodule - motion-cue dot rasterizer for an RGBA4444 block-linear
-// framebuffer.
+// Kinestop HUD - motion-cue dot rasterizer for an RGBA4444 block-linear
+// framebuffer (libtesla's, written through Renderer::getCurrentFramebuffer()).
 //
-// Part of the sysmodule/overlay split of the original Kinestop by SertAy
+// Part of a modified version of the original Kinestop by SertAy
 // (https://github.com/sertay1/Kinestop). The look (filled core in the theme's
 // core color, ring in its border color) follows the original overlay's
 // draw_motion_cue_dot(), drawn at half resolution with edge anti-aliasing.
@@ -11,7 +11,8 @@
 // Pixel format: libnx RGBA4 bit order (r = bits 0-3, g = 4-7, b = 8-11,
 // a = 12-15), the same layout as tsl::Color. libtesla's setPixelBlendDst()
 // over a cleared (all-zero) framebuffer stores rgb * a, i.e. premultiplied
-// alpha, which is what the original Kinestop HUD produced; we store
+// alpha, which is what the original Kinestop HUD produced (and what every
+// other libtesla draw call produces over a cleared screen); we store
 // premultiplied colors too and composite with premultiplied "over".
 
 #pragma once

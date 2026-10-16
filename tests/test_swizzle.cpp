@@ -1,6 +1,6 @@
 // Kinestop host tests - block-linear framebuffer addressing (swizzle.hpp).
 //
-// Part of the sysmodule/overlay split of the original Kinestop by SertAy
+// Part of a modified version of the original Kinestop by SertAy
 // (https://github.com/sertay1/Kinestop).
 //
 // Three independent oracles:
@@ -159,7 +159,7 @@ void test_640x360_layout() {
     CHECK(padding_free);
 }
 
-// KINESTOP_DEBUG_SCALED_SMALL (LayerMode::Quarter2x): 320x180 RGBA4444.
+// A 320x180 RGBA4444 framebuffer (fb_scale 0.25).
 // libnx framebufferCreate(): stride (320*2 + 63) & ~63 = 640 B, rows
 // (180 + 127) & ~127 = 256 -> 163,840 B per slot.
 void test_320x180_layout() {

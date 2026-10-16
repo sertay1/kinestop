@@ -1,6 +1,6 @@
-// Kinestop host tests - dot rasterizer (sysmodule/source/raster.hpp).
+// Kinestop host tests - dot rasterizer (overlay/source/raster.hpp).
 //
-// Part of the sysmodule/overlay split of the original Kinestop by SertAy
+// Part of a modified version of the original Kinestop by SertAy
 // (https://github.com/sertay1/Kinestop).
 //
 // The renderer clears only the rectangles it drew into a buffer slot the last
@@ -22,7 +22,7 @@ namespace swz = kinestop::swizzle;
 namespace {
 
 constexpr uint32_t W = 640, H = 360;
-// KINESTOP_DEBUG_SCALED_SMALL framebuffer.
+// A 320x180 framebuffer (fb_scale 0.25).
 constexpr uint32_t SW = 320, SH = 180;
 
 struct Buffer {
@@ -116,7 +116,7 @@ void test_not_clipped() {
 }
 
 // The 320x180 surface: same containment / padding / clear guarantees, with
-// the radii the sysmodule uses at fb_scale 0.25 (min core 0.5 px, ring 1 px).
+// the radii the HUD would use at fb_scale 0.25 (min core 0.5 px, ring 1 px).
 void test_small_surface() {
     const float xs[] = {-10.0f, 0.0f, 0.3f, 8.125f, 160.0f, 314.6f, 319.5f, 320.0f, 330.0f};
     const float ys[] = {-10.0f, 0.0f, 0.7f, 8.0f, 90.25f, 175.0f, 179.5f, 180.0f, 190.0f};

@@ -4,9 +4,9 @@
 // Original Kinestop by SertAy (https://github.com/sertay1/Kinestop). The
 // tables, get_anchors() and compute_offset() are ported unchanged (same
 // values, same positions, same math) from the original overlay's main.cpp;
-// moving them here for the sysmodule/overlay split is a modification of the
-// original project. Anchors are written into a caller-provided array instead
-// of a std::vector so the sysmodule never touches the heap per frame.
+// moving them here is part of a modified version of the original project.
+// Anchors are written into a caller-provided array instead of a std::vector
+// so the HUD never touches the heap per frame.
 
 #include "dots.hpp"
 
@@ -201,9 +201,9 @@ size_t get_anchors(int style, int density, Point* out, size_t max) {
 
 // Port of the displacement half of the original draw_motion_dots(). The other
 // half - clamping each final dot position to [10,1270]x[10,710] when
-// !free_floating - stays with the renderer side (the sysmodule's
-// build_frame() in sysmodule/source/main.cpp), because it applies per dot
-// (anchor + offset) rather than to the shared offset.
+// !free_floating - stays with the renderer side (dot_center() in
+// overlay/source/hud_frame.hpp), because it applies per dot (anchor + offset)
+// rather than to the shared offset.
 Point compute_offset(const Orientation& raw, const Config& cfg) {
     // Handheld calibration delta calculation
     float pitch = raw.pitch_deg - cfg.calibration.pitch_offset;

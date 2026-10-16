@@ -1,6 +1,6 @@
 // Kinestop host tests - common/config.{hpp,cpp}.
 //
-// Part of the sysmodule/overlay split of the original Kinestop by SertAy
+// Part of a modified version of the original Kinestop by SertAy
 // (https://github.com/sertay1/Kinestop).
 
 #include <cmath>
@@ -37,7 +37,7 @@ bool file_exists(const std::string& path) {
 bool same(const Config& a, const Config& b, double tol) {
     auto f = [tol](float x, float y) { return check::near(x, y, tol); };
     return a.general.enabled == b.general.enabled && a.general.poll_rate_hz == b.general.poll_rate_hz &&
-           a.general.language == b.general.language && a.general.debug_flags == b.general.debug_flags &&
+           a.general.language == b.general.language && a.general.console_sensor == b.general.console_sensor &&
            a.visual.style == b.visual.style && a.visual.color == b.visual.color &&
            a.visual.density == b.visual.density && f(a.visual.opacity, b.visual.opacity) &&
            a.visual.line_thickness == b.visual.line_thickness && a.visual.free_floating == b.visual.free_floating &&
@@ -56,7 +56,7 @@ Config non_default() {
     c.general.enabled = false;
     c.general.poll_rate_hz = 90;
     c.general.language = 1;
-    c.general.debug_flags = KINESTOP_DEBUG_BLINK_TEST | KINESTOP_DEBUG_VERBOSE_LOG;  // 5
+    c.general.console_sensor = true;
     c.visual.style = 4;
     c.visual.color = 7;
     c.visual.density = 3;
@@ -80,7 +80,7 @@ void check_original_defaults(const Config& c) {
     CHECK_EQ(c.general.enabled, true);
     CHECK_EQ(c.general.poll_rate_hz, 60);
     CHECK_EQ(c.general.language, 0);
-    CHECK_EQ(c.general.debug_flags, 0);  // test-build field, off by default
+    CHECK_EQ(c.general.console_sensor, false);  // new field, off by default
     CHECK_EQ(c.visual.style, 0);
     CHECK_EQ(c.visual.color, 0);
     CHECK_EQ(c.visual.density, 1);
@@ -126,7 +126,7 @@ void test_roundtrip() {
     CHECK(b.load(path.c_str()));
     CHECK(same(a, b, 1e-4));
     CHECK_EQ(b.visual.show_in_captures, true);
-    CHECK_EQ(b.general.debug_flags, 5);
+    CHECK_EQ(b.general.console_sensor, true);
 
     // Loading again from the saved-and-loaded copy is a fixed point.
     const std::string path2 = g_tmp + "/config2.ini";
@@ -189,7 +189,7 @@ void test_legacy_file() {
     CHECK_EQ(c.general.enabled, true);
     CHECK_EQ(c.general.poll_rate_hz, 60);
     CHECK_EQ(c.general.language, 0);          // absent -> default
-    CHECK_EQ(c.general.debug_flags, 0);       // absent -> default
+    CHECK_EQ(c.general.console_sensor, false); // absent -> default
     CHECK_EQ(c.visual.style, 0);
     CHECK_EQ(c.visual.color, 0);              // absent -> default
     CHECK_EQ(c.visual.density, 1);            // absent -> default
@@ -206,7 +206,7 @@ void test_legacy_file() {
     CHECK_EQ(c.calibration.sensitivity_pitch, 1.0f);
     CHECK_EQ(c.calibration.sensitivity_roll, 1.0f);
 
-    // Re-saving drops the legacy keys and adds show_in_captures.
+    // Re-saving drops the legacy keys and adds the new ones.
     CHECK(c.save(path.c_str()));
     FILE* f = std::fopen(path.c_str(), "r");
     CHECK(f != nullptr);
@@ -218,7 +218,7 @@ void test_legacy_file() {
         CHECK(std::strstr(buf, "draw_center_reticle") == nullptr);
         CHECK(std::strstr(buf, "draw_roll_indicators") == nullptr);
         CHECK(std::strstr(buf, "show_in_captures = false") != nullptr);
-        CHECK(std::strstr(buf, "debug_flags = 0") != nullptr);
+        CHECK(std::strstr(buf, "console_sensor = false") != nullptr);
         CHECK(std::strstr(buf, "SertAy") != nullptr);
     }
 }
@@ -259,171 +259,47 @@ void test_parser_robustness() {
     CHECK_EQ(c.calibration.sensitivity_roll, 3.0f);    // ...and the next line still parsed
 }
 
-// [general] debug_flags: parsed as an int, junk keeps the default, each bit
-// is independent.
-void test_debug_flags_parse() {
-    const std::string path = g_tmp + "/debug.ini";
+// [general] console_sensor: a bool like the others, only under [general].
+void test_console_sensor() {
+    const std::string path = g_tmp + "/sensor.ini";
 
-    write_file(path, "[general]\ndebug_flags = 6\n");
+    write_file(path, "[general]\r\n  CONSOLE_SENSOR=on \r\n");
     Config a;
     CHECK(a.load(path.c_str()));
-    CHECK_EQ(a.general.debug_flags, (int)(KINESTOP_DEBUG_UNSCALED_LAYER | KINESTOP_DEBUG_VERBOSE_LOG));
+    CHECK_EQ(a.general.console_sensor, true);
 
-    write_file(path, "[general]\r\n  DEBUG_FLAGS=1 \r\n");
+    write_file(path, "[general]\nconsole_sensor = maybe\n");
     Config b;
     CHECK(b.load(path.c_str()));
-    CHECK_EQ(b.general.debug_flags, (int)KINESTOP_DEBUG_BLINK_TEST);
+    CHECK_EQ(b.general.console_sensor, false);  // junk keeps the default
 
-    write_file(path, "[general]\ndebug_flags = lots\n");
+    write_file(path, "[visual]\nconsole_sensor = true\n");
     Config c;
     CHECK(c.load(path.c_str()));
-    CHECK_EQ(c.general.debug_flags, 0);
-
-    write_file(path, "[general]\ndebug_flags = -1\n");
-    Config d;
-    CHECK(d.load(path.c_str()));
-    CHECK_EQ(d.general.debug_flags, 0);
-
-    // Only under [general].
-    write_file(path, "[visual]\ndebug_flags = 7\n");
-    Config e;
-    CHECK(e.load(path.c_str()));
-    CHECK_EQ(e.general.debug_flags, 0);
-
-    // save() writes it under [general]; it survives a round trip.
-    Config f;
-    f.general.debug_flags = 3;
-    CHECK(f.save(path.c_str()));
-    Config g;
-    CHECK(g.load(path.c_str()));
-    CHECK_EQ(g.general.debug_flags, 3);
-
-    // Every defined bit survives sanitize(); anything above KINESTOP_DEBUG_ALL
-    // is dropped.
-    write_file(path, "[general]\ndebug_flags = 63\n");
-    Config h;
-    CHECK(h.load(path.c_str()));
-    CHECK_EQ(h.general.debug_flags, (int)KINESTOP_DEBUG_ALL);
-    CHECK_EQ(h.general.debug_flags, (int)(KINESTOP_DEBUG_BLINK_TEST | KINESTOP_DEBUG_UNSCALED_LAYER |
-                                          KINESTOP_DEBUG_VERBOSE_LOG | KINESTOP_DEBUG_NO_SUSPEND |
-                                          KINESTOP_DEBUG_SCALED_SMALL | KINESTOP_DEBUG_LOW_Z));
-
-    write_file(path, "[general]\ndebug_flags = 255\n");
-    Config i;
-    CHECK(i.load(path.c_str()));
-    CHECK_EQ(i.general.debug_flags, (int)KINESTOP_DEBUG_ALL);
-
-    write_file(path, "[general]\ndebug_flags = 80\n");  // 0x40 (unknown) | SCALED_SMALL
-    Config j;
-    CHECK(j.load(path.c_str()));
-    CHECK_EQ(j.general.debug_flags, (int)KINESTOP_DEBUG_SCALED_SMALL);
+    CHECK_EQ(c.general.console_sensor, false);
 }
 
-void test_wire() {
-    const Config a = non_default();
-    KinestopWireConfig w;
-    std::memset(&w, 0xAB, sizeof(w));
-    a.to_wire(w);
-
-    CHECK_EQ(w.style, 4);
-    CHECK_EQ(w.color, 7);
-    CHECK_EQ(w.density, 3);
-    CHECK_EQ(w.dot_size, 8);
-    CHECK_EQ(w.free_floating, 0);
-    CHECK_EQ(w.invert_pitch, 1);
-    CHECK_EQ(w.invert_roll, 1);
-    CHECK_EQ(w.show_in_captures, 1);
-    CHECK_EQ(w.poll_rate_hz, 90);
-    CHECK_EQ(w.debug_flags, 5);
-    CHECK_EQ(w.reserved, 0);
-    CHECK_EQ(w.opacity, 0.35f);
-    CHECK_EQ(w.filter_alpha, 0.92f);
-    CHECK_EQ(w.deadzone_deg, 1.5f);
-    CHECK_EQ(w.pitch_offset, -12.375f);
-    CHECK_EQ(w.roll_offset, 3.1415927f);
-    CHECK_EQ(w.sensitivity_pitch, 2.0f);
-    CHECK_EQ(w.sensitivity_roll, 4.0f);
-
-    // from_wire restores everything carried, exactly, and leaves the
-    // general fields that are not on the wire alone.
-    Config b;
-    b.general.enabled = true;
-    b.general.language = 0;
-    b.from_wire(w);
-    Config expect = a;
-    expect.general.enabled = true;
-    expect.general.language = 0;
-    CHECK(same(b, expect, 0.0));
-
-    // to_wire works on a sanitized copy and does not modify the source.
-    Config bad;
-    bad.visual.style = 99;
-    bad.visual.line_thickness = -4;
-    bad.general.poll_rate_hz = 100000;
-    bad.visual.opacity = 7.0f;
-    KinestopWireConfig w2;
-    bad.to_wire(w2);
-    CHECK_EQ(w2.style, 0);  // unknown style -> Perimeter, like the original
-    CHECK_EQ(w2.dot_size, 0);
-    CHECK_EQ(w2.poll_rate_hz, 120);
-    CHECK_EQ(w2.opacity, 1.0f);
-    CHECK_EQ(w2.debug_flags, 0);
-    CHECK_EQ(w2.reserved, 0);
-    CHECK_EQ(bad.visual.style, 99);
-
-    // debug_flags on the wire: unknown bits are dropped, both ways.
-    Config dbg;
-    dbg.general.debug_flags = 0xFF;
-    KinestopWireConfig w3;
-    dbg.to_wire(w3);
-    CHECK_EQ(w3.debug_flags, (int)KINESTOP_DEBUG_ALL);
-    CHECK_EQ(dbg.general.debug_flags, 0xFF);  // source untouched
-    w3.debug_flags = 0xC2;  // 0b11000010: only UNSCALED_LAYER is known
-    Config dbg2;
-    dbg2.from_wire(w3);
-    CHECK_EQ(dbg2.general.debug_flags, (int)KINESTOP_DEBUG_UNSCALED_LAYER);
-    for (int bits = 0; bits <= (int)KINESTOP_DEBUG_ALL; ++bits) {
-        Config x;
-        x.general.debug_flags = bits;
-        KinestopWireConfig wx;
-        x.to_wire(wx);
-        Config y;
-        y.from_wire(wx);
-        CHECK_ALL(wx.debug_flags == bits && y.general.debug_flags == bits, "debug_flags %d", bits);
-    }
-
-    // from_wire sanitizes hostile input.
-    KinestopWireConfig h;
-    std::memset(&h, 0, sizeof(h));
-    h.style = 200;
-    h.color = 255;
-    h.density = 9;
-    h.dot_size = 50;
-    h.free_floating = 7;  // any non-zero is true
-    h.poll_rate_hz = 1;
-    h.opacity = std::numeric_limits<float>::quiet_NaN();
-    h.filter_alpha = 2.0f;
-    h.deadzone_deg = -1.0f;
-    h.pitch_offset = std::numeric_limits<float>::infinity();
-    h.roll_offset = -std::numeric_limits<float>::infinity();
-    h.sensitivity_pitch = 0.0f;
-    h.sensitivity_roll = 1000.0f;
+// debug_flags from the 2.0.0 sysmodule test builds is ignored on load and
+// not written back.
+void test_legacy_debug_flags() {
+    const std::string path = g_tmp + "/debug.ini";
+    write_file(path, "[general]\nenabled = false\ndebug_flags = 13\nlanguage = 1\n");
     Config c;
-    c.from_wire(h);
-    CHECK_EQ(c.visual.style, 0);
-    CHECK_EQ(c.visual.color, 11);
-    CHECK_EQ(c.visual.density, 3);
-    CHECK_EQ(c.visual.line_thickness, 9);
-    CHECK_EQ(c.visual.free_floating, true);
-    CHECK_EQ(c.general.poll_rate_hz, 10);
-    CHECK_EQ(c.visual.opacity, 0.80f);
-    CHECK(c.filter.alpha < 1.0f);
-    CHECK_EQ(c.filter.deadzone_deg, 0.0f);
-    CHECK_EQ(c.calibration.pitch_offset, 0.0f);
-    CHECK_EQ(c.calibration.roll_offset, 0.0f);
-    CHECK_EQ(c.calibration.sensitivity_pitch, 0.2f);
-    CHECK_EQ(c.calibration.sensitivity_roll, 6.0f);
-    CHECK_EQ(c.general.debug_flags, 0);
+    CHECK(c.load(path.c_str()));
+    CHECK_EQ(c.general.enabled, false);
+    CHECK_EQ(c.general.language, 1);
+    CHECK_EQ(c.general.console_sensor, false);
+
+    CHECK(c.save(path.c_str()));
+    FILE* f = std::fopen(path.c_str(), "r");
+    CHECK(f != nullptr);
+    if (f) {
+        char buf[4096];
+        size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+        buf[n] = '\0';
+        std::fclose(f);
+        CHECK(std::strstr(buf, "debug_flags") == nullptr);
+    }
 }
 
 void test_sanitize() {
@@ -432,7 +308,6 @@ void test_sanitize() {
     Config lo;
     lo.general.poll_rate_hz = -5;
     lo.general.language = -1;
-    lo.general.debug_flags = -1;  // not "every bit": negative means none
     lo.visual.style = -1;
     lo.visual.color = -1;
     lo.visual.density = -1;
@@ -445,7 +320,6 @@ void test_sanitize() {
     lo.sanitize();
     CHECK_EQ(lo.general.poll_rate_hz, 10);
     CHECK_EQ(lo.general.language, 0);
-    CHECK_EQ(lo.general.debug_flags, 0);
     CHECK_EQ(lo.visual.style, 0);
     CHECK_EQ(lo.visual.color, 0);
     CHECK_EQ(lo.visual.density, 0);
@@ -459,7 +333,6 @@ void test_sanitize() {
     Config hi;
     hi.general.poll_rate_hz = 1000;
     hi.general.language = 7;
-    hi.general.debug_flags = 0x7FFFFFFF;  // unknown bits dropped, known kept
     hi.visual.style = 6;
     hi.visual.color = 12;
     hi.visual.density = 4;
@@ -472,7 +345,6 @@ void test_sanitize() {
     hi.sanitize();
     CHECK_EQ(hi.general.poll_rate_hz, 120);
     CHECK_EQ(hi.general.language, 1);
-    CHECK_EQ(hi.general.debug_flags, (int)KINESTOP_DEBUG_ALL);
     CHECK_EQ(hi.visual.style, 0);  // original get_anchors(): default -> Perimeter
     CHECK_EQ(hi.visual.color, 11);
     CHECK_EQ(hi.visual.density, 3);
@@ -510,7 +382,7 @@ void test_sanitize() {
     // load() sanitizes what it reads.
     const std::string path = g_tmp + "/out_of_range.ini";
     write_file(path,
-               "[general]\npoll_rate_hz = 5000\nlanguage = 3\ndebug_flags = 108\n"
+               "[general]\npoll_rate_hz = 5000\nlanguage = 3\n"
                "[visual]\nstyle = 42\ncolor = -3\nopacity = 9\nline_thickness = 99999999999\n"
                "[filter]\nalpha = nan\ndeadzone_deg = 50\n"
                "[calibration]\nsensitivity_roll = 0\n");
@@ -518,7 +390,6 @@ void test_sanitize() {
     CHECK(l.load(path.c_str()));
     CHECK_EQ(l.general.poll_rate_hz, 120);
     CHECK_EQ(l.general.language, 1);
-    CHECK_EQ(l.general.debug_flags, 44);  // 108 = 0b1101100: bit 6 dropped
     CHECK_EQ(l.visual.style, 0);
     CHECK_EQ(l.visual.color, 0);
     CHECK_EQ(l.visual.opacity, 1.0f);
@@ -544,8 +415,8 @@ int main() {
     test_roundtrip();
     test_legacy_file();
     test_parser_robustness();
-    test_debug_flags_parse();
-    test_wire();
+    test_console_sensor();
+    test_legacy_debug_flags();
     test_sanitize();
 
     const std::string cmd = "rm -rf '" + g_tmp + "'";
