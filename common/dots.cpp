@@ -228,15 +228,6 @@ Point compute_offset(const Orientation& raw, const Config& cfg) {
     return Point{target_dx, target_dy};
 }
 
-float offset_sensitivity(float sensitivity, int steps) {
-    int nearest = 0;
-    for (int i = 1; i < (int)NUM_SENSITIVITIES; ++i) {
-        if (std::abs(SENSITIVITIES[i] - sensitivity) < std::abs(SENSITIVITIES[nearest] - sensitivity))
-            nearest = i;
-    }
-    return SENSITIVITIES[clamp_int(nearest + steps, 0, (int)NUM_SENSITIVITIES - 1)];
-}
-
 float dot_radius(const Config& cfg) {
     int size_idx = clamp_int(cfg.visual.line_thickness, 0, (int)NUM_SIZES - 1);
     return (float)SIZES[size_idx] * 0.9f;

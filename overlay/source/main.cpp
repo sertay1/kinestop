@@ -50,7 +50,8 @@ namespace {
     constexpr u64 NoticeNs         = 3000000000ULL;  // transient notice duration
     constexpr u64 SensorRetryNs    = 1000000000ULL;  // retry starting sensors that failed to start
     constexpr u64 SensorFreshNs    =  500000000ULL;  // orientation counts as current this long after a sample
-    constexpr u64 HudCalibrateWaitNs = 500000000ULL; // HUD: longest wait for a sample to calibrate on
+    constexpr u64 HudCalibrateWaitNs = 1000000000ULL; // HUD: longest wait for motion data to calibrate on
+    constexpr u64 HudCalibrateSettleNs = 150000000ULL; // HUD: real samples needed before calibrating
 
     // Proper 4-bit RGBA4444 color constructor (0..15 per channel)
     inline constexpr tsl::Color make_color(u8 r, u8 g, u8 b, u8 a = 255) {
@@ -125,8 +126,8 @@ namespace {
     bool                        g_hidDown      = false;  // libtesla is restarting HID
     kinestop::ComplementaryFilter g_filter;
     kinestop::Orientation       g_orientation;           // raw filtered orientation (calibration not applied)
-    kinestop::SensorSource      g_orientationSource = kinestop::SensorSource::None; // sensor of the latest sample
     u64                         g_lastSampleTick = 0;    // 0 = no sample yet
+    u64                         g_realSinceTick = 0;     // start of the current run of real samples, 0 = none
     bool                        g_hudReady = false;      // HUD: calibrated (or gave up waiting); dots may show
     u64                         g_nextRetryTick  = 0;
 
@@ -168,16 +169,31 @@ namespace {
         kinestop::SensorSample smp;
         if (!g_sensor.sample(smp))
             return;
+        // HID's placeholder state (accel exactly (0,0,-1), no rotation: "lying
+        // flat") shows up e.g. right after the sensor starts. A real flat
+        // console always has some noise, so an exact match is never real data.
+        if (smp.accel.x == 0.0f && smp.accel.y == 0.0f && smp.accel.z == -1.0f &&
+            smp.gyro.x == 0.0f && smp.gyro.y == 0.0f && smp.gyro.z == 0.0f) {
+            g_realSinceTick = 0;
+            return;
+        }
+        // A gap longer than SensorFreshNs starts a new run.
+        if (g_realSinceTick == 0 || g_lastSampleTick == 0 || armTicksToNs(now - g_lastSampleTick) >= SensorFreshNs)
+            g_realSinceTick = now;
         // dt since the previous fresh sample, so gyro integration covers
         // frames without one (clamped inside update()).
         const float dt = g_lastSampleTick != 0 ? (float)armTicksToNs(now - g_lastSampleTick) / 1e9f : 0.0f;
         g_orientation = g_filter.update(smp.accel, smp.gyro, dt, g_config);
-        g_orientationSource = smp.source;
         g_lastSampleTick = now;
     }
 
     bool sensor_fresh() {
         return g_lastSampleTick != 0 && armTicksToNs(armGetSystemTick() - g_lastSampleTick) < SensorFreshNs;
+    }
+
+    // Real (non-placeholder) samples have kept arriving for at least ns.
+    bool sensor_settled(u64 ns) {
+        return g_realSinceTick != 0 && sensor_fresh() && armTicksToNs(armGetSystemTick() - g_realSinceTick) >= ns;
     }
 
     // ---------------------------------------------------------------------
@@ -286,19 +302,6 @@ namespace {
             tsl::cfg::FramebufferWidth, tsl::cfg::FramebufferHeight};
         if (surface.pixels == nullptr)
             return;
-        // The console sensor reacts much less than the controllers' at the
-        // same setting: while it drives the dots, sensitivity moves up by
-        // the Console Sensor Boost steps.
-        if (g_orientationSource == kinestop::SensorSource::SevenSixAxis &&
-            g_config.calibration.console_sensitivity_offset != 0) {
-            kinestop::Config boosted = g_config;
-            const int steps = g_config.calibration.console_sensitivity_offset;
-            boosted.calibration.sensitivity_roll  = dots::offset_sensitivity(g_config.calibration.sensitivity_roll, steps);
-            boosted.calibration.sensitivity_pitch = dots::offset_sensitivity(g_config.calibration.sensitivity_pitch, steps);
-            kinestop::hud::draw_dots(surface, frame, dots::compute_offset(g_orientation, boosted),
-                                     g_config.visual.free_floating);
-            return;
-        }
         kinestop::hud::draw_dots(surface, frame, dots::compute_offset(g_orientation, g_config),
                                  g_config.visual.free_floating);
     }
@@ -346,7 +349,8 @@ public:
         sensor_tick();
         if (g_hudReady)
             return;
-        // Calibrate on Start: the first fresh sample is the new zero, as the
+        // Calibrate on Start: once real samples have been arriving for
+        // HudCalibrateSettleNs, the orientation becomes the new zero, as the
         // menu's Calibrate Zero Position does. Without motion data (HOME
         // menu or homebrew with the console sensor off) the dots show with
         // the saved zero after HudCalibrateWaitNs.
@@ -355,7 +359,7 @@ public:
             m_startTick = now;
         if (!g_config.calibration.auto_calibrate) {
             g_hudReady = true;
-        } else if (sensor_fresh()) {
+        } else if (sensor_settled(HudCalibrateSettleNs)) {
             g_config.calibration.pitch_offset = g_orientation.pitch_deg;
             g_config.calibration.roll_offset  = g_orientation.roll_deg;
             save_config_now();
@@ -526,11 +530,6 @@ public:
             add_body("verisi durur). 512 KB overlay belleği");
             add_body("kullanır; varsayılan olarak kapalıdır.");
 
-            add_sub("Konsol Sensörü Takviyesi (+0 - +9):", make_color(255, 170, 50));
-            add_body("Konsol sensörü daha az tepki verir;");
-            add_body("noktaları o sürerken Hassasiyet bu");
-            add_body("kadar adım artırılır (varsayılan +4).");
-
             add_sub("Desen (Yerleşim):", make_color(255, 210, 60));
             add_body("Noktaların ekrandaki yerleşim şablonu:");
             add_body("- Perimeter: 4 dış kenar çerçevesi");
@@ -651,11 +650,6 @@ public:
             add_body("too (controller motion data stops");
             add_body("there). Uses 512 KB of overlay memory;");
             add_body("off by default.");
-
-            add_sub("Console Sensor Boost (+0 - +9):", make_color(255, 170, 50));
-            add_body("The console sensor reacts less, so");
-            add_body("while it moves the dots, Sensitivity");
-            add_body("goes up this many steps (default +4).");
 
             add_sub("Pattern (Placement):", make_color(255, 210, 60));
             add_body("Choose where dots appear on screen:");
@@ -870,26 +864,6 @@ public:
         };
         if (isTr) add_note(list, sensorTr, 3);
         else      add_note(list, sensorEn, 2);
-
-        auto *boostTrackBar = new tsl::elm::NamedStepTrackBar("", {
-            "+0", "+1", "+2", "+3", "+4", "+5", "+6", "+7", "+8", "+9"
-        }, true, isTr ? "Konsol Sensörü Takviyesi" : "Console Sensor Boost");
-        boostTrackBar->setProgress((u8)std::clamp(g_config.calibration.console_sensitivity_offset, 0, 9));
-        boostTrackBar->setValueChangedListener([](u8 index) {
-            g_config.calibration.console_sensitivity_offset = std::clamp((int)index, 0, 9);
-            apply_setting();
-        });
-        list->addItem(boostTrackBar);
-
-        static constexpr const char* boostEn[] = {
-            "Extra Sensitivity steps while the",
-            "console sensor moves the dots.",
-        };
-        static constexpr const char* boostTr[] = {
-            "Konsol sensörü noktaları hareket",
-            "ettirirken eklenen Hassasiyet adımı.",
-        };
-        add_note(list, isTr ? boostTr : boostEn, 2);
 
         // ------------------ PATTERN & DENSITY ------------------
         list->addItem(new tsl::elm::CategoryHeader(isTr ? "Yerleşim ve Yoğunluk" : "Placement & Density"));

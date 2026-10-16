@@ -33,9 +33,6 @@ struct CalibrationConfig {
     bool auto_calibrate = true;      // the HUD takes its first sample as the zero (ini key "auto_calibrate")
     float sensitivity_pitch = 1.0f;  // 0.2f to 6.0f
     float sensitivity_roll = 1.0f;   // 0.2f to 6.0f
-    int console_sensitivity_offset = 4; // extra dots::SENSITIVITIES steps while the console sensor
-                                        // (SevenSixAxis) drives the dots: 0..9; ini key
-                                        // "console_sensitivity_offset"
 };
 
 struct Config {

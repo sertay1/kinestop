@@ -133,7 +133,6 @@ void Config::set_defaults() {
     calibration.auto_calibrate = true;
     calibration.sensitivity_pitch = 1.0f;
     calibration.sensitivity_roll = 1.0f;
-    calibration.console_sensitivity_offset = 4;
 }
 
 void Config::sanitize() {
@@ -158,7 +157,6 @@ void Config::sanitize() {
     if (!std::isfinite(calibration.roll_offset)) calibration.roll_offset = 0.0f;
     calibration.sensitivity_pitch = clampf(calibration.sensitivity_pitch, 0.2f, 6.0f, 1.0f);
     calibration.sensitivity_roll = clampf(calibration.sensitivity_roll, 0.2f, 6.0f, 1.0f);
-    calibration.console_sensitivity_offset = clampi(calibration.console_sensitivity_offset, 0, 9);
 }
 
 bool Config::load(const char* filepath) {
@@ -237,7 +235,6 @@ bool Config::load(const char* filepath) {
                 else if (!std::strcmp(key, "auto_calibrate")) calibration.auto_calibrate = parse_bool(val, calibration.auto_calibrate);
                 else if (!std::strcmp(key, "sensitivity_pitch")) calibration.sensitivity_pitch = parse_float(val, calibration.sensitivity_pitch);
                 else if (!std::strcmp(key, "sensitivity_roll")) calibration.sensitivity_roll = parse_float(val, calibration.sensitivity_roll);
-                else if (!std::strcmp(key, "console_sensitivity_offset")) calibration.console_sensitivity_offset = parse_int(val, calibration.console_sensitivity_offset);
                 break;
             case None:
                 break;
@@ -294,7 +291,6 @@ bool Config::save(const char* filepath) const {
     std::fprintf(file, "auto_calibrate = %s\n", bool_str(calibration.auto_calibrate));
     std::fprintf(file, "sensitivity_pitch = %g\n", (double)calibration.sensitivity_pitch);
     std::fprintf(file, "sensitivity_roll = %g\n", (double)calibration.sensitivity_roll);
-    std::fprintf(file, "console_sensitivity_offset = %d\n", calibration.console_sensitivity_offset);
 
     bool ok = !std::ferror(file);
     if (std::fclose(file) != 0) ok = false;
