@@ -1,4 +1,8 @@
 #---------------------------------------------------------------------------------
+# Kinestop overlay - settings/control panel for the Kinestop sysmodule.
+# Modified version of the original Kinestop by SertAy
+# (https://github.com/sertay1/Kinestop).
+#---------------------------------------------------------------------------------
 .SUFFIXES:
 #---------------------------------------------------------------------------------
 
@@ -11,25 +15,25 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE       := Kinestop
 APP_AUTHOR      := Kinestop
-APP_VERSION     := 1.0.0
+APP_VERSION     := 2.0.0
 
 TARGET          := kinestop
 BUILD           := build
-SOURCES         := source ../common ../sysmodule/source lib/libultrahand/libtesla/source lib/libultrahand/libultra/source lib/libultrahand/common
+SOURCES         := source ../common lib/libultrahand/libtesla/source lib/libultrahand/libultra/source lib/libultrahand/common
 DATA            := data
-INCLUDES        := include source ../common ../sysmodule/include ../sysmodule/source lib/libultrahand/libtesla/include lib/libultrahand/libultra/include lib/libultrahand/common
+INCLUDES        := include source ../common lib/libultrahand/libtesla/include lib/libultrahand/libultra/include lib/libultrahand/common
 
 NO_ICON         := 1
 
 ARCH    := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
-CFLAGS  := -g -Wall -O2 -ffunction-sections $(ARCH) $(DEFINES)
+CFLAGS  := -g -Wall -O2 -ffunction-sections -fdata-sections $(ARCH) $(DEFINES)
 CFLAGS  += $(INCLUDE) -D__SWITCH__
 
 CXXFLAGS := $(CFLAGS) -fno-exceptions -std=c++20
 
 ASFLAGS := -g $(ARCH)
-LDFLAGS = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+LDFLAGS = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,--gc-sections
 
 LIBS    := -lnx
 
@@ -46,8 +50,7 @@ export VPATH    := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
 export DEPSDIR  := $(CURDIR)/$(BUILD)
 
 CFILES      := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(CURDIR)/$(dir)/*.c)))
-CPPFILES    := $(foreach dir,$(SOURCES),$(filter-out main.cpp renderer.cpp,$(notdir $(wildcard $(CURDIR)/$(dir)/*.cpp))))
-CPPFILES    += main.cpp
+CPPFILES    := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(CURDIR)/$(dir)/*.cpp)))
 SFILES      := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(CURDIR)/$(dir)/*.s)))
 BINFILES    := $(foreach dir,$(DATA),$(notdir $(wildcard $(CURDIR)/$(dir)/*.*)))
 
@@ -93,7 +96,8 @@ $(OUTPUT).ovl: $(OUTPUT).elf $(OUTPUT).nacp
 	@elf2nro $< $@ $(NROFLAGS)
 	@echo "built ... $(notdir $@)"
 
-$(OUTPUT).nacp:
+# Regenerated when the Makefile (APP_VERSION) changes; kinestop.nacp is committed.
+$(OUTPUT).nacp: $(TOPDIR)/Makefile
 	@nacptool --create "$(APP_TITLE)" "$(APP_AUTHOR)" "$(APP_VERSION)" $@
 
 $(OUTPUT).elf: $(OFILES)

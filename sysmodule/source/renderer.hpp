@@ -1,62 +1,97 @@
+// Kinestop sysmodule - VI layer + framebuffer that shows the motion-cue dots.
+//
+// Original Kinestop by SertAy (https://github.com/sertay1/Kinestop). The
+// sysmodule/overlay split is a modification of the original project: dots
+// used to be drawn by the Tesla overlay itself; now this module owns a VI
+// managed layer the way libtesla does, but with a 640x360 framebuffer that VI
+// scales to the full screen.
+
 #pragma once
 
 #include <switch.h>
-#include <cstdint>
-#include "../../common/math_types.hpp"
-#include "../../common/config.hpp"
+#include <cstddef>
+
+#include "../../common/kinestop_ipc.h"
+#include "../../common/dots.hpp"
+#include "raster.hpp"
 
 namespace kinestop {
 
-class OverlayRenderer {
-public:
-    OverlayRenderer();
-    ~OverlayRenderer();
+// One frame's worth of dots, already in framebuffer coordinates.
+struct DotFrame {
+    size_t count;
+    dots::Point centers[dots::MAX_ANCHORS];
+    raster::DotStyle style;
+};
 
-    bool init();
+class Renderer {
+public:
+    static constexpr u32 FB_WIDTH  = 640;
+    static constexpr u32 FB_HEIGHT = 360;
+    static constexpr u32 NUM_FBS   = 2;
+
+    // VI coordinate space for a full-screen layer. libtesla uses 1920x1080
+    // (tsl::cfg::ScreenWidth/ScreenHeight) for every layer size/position.
+    static constexpr s32 LAYER_WIDTH  = 1920;
+    static constexpr s32 LAYER_HEIGHT = 1080;
+
+    // libtesla drops its own layer to Z=34 while docked with TV underscan
+    // active; stay just below it in that case.
+    static constexpr s32 UNDERSCAN_Z = 33;
+
+    Renderer();
+
+    // Creates the layer and framebuffer. On failure everything created so far
+    // is torn down again and `stage` names the step that failed.
+    Result init(bool show_in_captures, KinestopStage& stage);
+
+    // Presents one transparent frame, then destroys everything.
     void exit();
 
-    /**
-     * @brief Render the artificial horizon HUD on top of the screen.
-     * @param ori Filtered orientation (pitch and roll in degrees)
-     * @param cfg Current visual configuration
-     */
-    void render_frame(const Orientation& ori, const Config& cfg);
+    bool ready() const { return m_fb_ok; }
+    bool in_captures() const { return m_in_captures; }
 
-    /**
-     * @brief Clear screen to full transparency (when disabled).
-     */
-    void clear_transparent();
+    // Draws and queues a frame. On failure the caller should exit() and retry
+    // init() later; `stage` is set to KinestopStage_Framebuffer. Succeeds with
+    // `presented` false when the compositor released no buffer within a
+    // bounded wait: the frame was skipped and should be presented again.
+    Result present(const DotFrame& frame, KinestopStage& stage, bool& presented);
 
-    bool is_initialized() const { return m_initialized; }
+    // Re-evaluates docked + TV underscan and adjusts Z like libtesla does.
+    // Cheap (two small IPCs); call about once per second. Returns the
+    // viSetLayerZ() failure, if any (non-fatal; retried on the next call).
+    Result update_z();
+
+    // Result of the last non-fatal error inside init() (e.g. a capture layer
+    // stack that could not be joined), 0 if none.
+    Result last_soft_error() const { return m_soft_rc; }
 
 private:
-    bool m_initialized;
+    bool m_vi_ok;
+    bool m_display_ok;
+    bool m_managed_ok;
+    bool m_layer_ok;
+    bool m_nwin_ok;
+    bool m_fb_ok;
+    bool m_in_captures;
+    bool m_underscan_z;
+    s32 m_normal_z;
+    Result m_soft_rc;
+
     ViDisplay m_display;
     ViLayer m_layer;
-    NWindow m_nwindow;
-    Framebuffer m_framebuffer;
-    Event m_vsync_event;
+    NWindow m_window;
+    Framebuffer m_fb;
 
-    static constexpr u32 SCREEN_WIDTH = 1280;
-    static constexpr u32 SCREEN_HEIGHT = 720;
-    static constexpr float CENTER_X = 640.0f;
-    static constexpr float CENTER_Y = 360.0f;
+    // Per-slot rectangles drawn last time, cleared before the slot is reused.
+    raster::Rect m_dirty[NUM_FBS][dots::MAX_ANCHORS];
+    size_t m_dirty_count[NUM_FBS];
 
-    // Helper to add layer to compositor stack
     Result add_to_layer_stack(ViLayerStack stack);
-
-    // Drawing primitives for RGBA4444
-    void draw_pixel(u16* buffer, s32 x, s32 y, u16 color);
-    void draw_line_thick(u16* buffer, float x0, float y0, float x1, float y1, int thickness, u16 color);
-    void draw_circle(u16* buffer, float cx, float cy, float radius, int thickness, u16 color);
-    void draw_filled_circle(u16* buffer, float cx, float cy, float radius, u16 color);
-
-    // Style renderers
-    void render_horizon_line(u16* buffer, float cx, float cy, float roll_deg, const VisualConfig& visual, u16 color);
-    void render_pitch_ladder(u16* buffer, float cx, float cy, float pitch_deg, float roll_deg, const VisualConfig& visual, u16 color);
-    void render_minimal_dots(u16* buffer, float cx, float cy, float roll_deg, const VisualConfig& visual, u16 color);
-    void render_center_reticle(u16* buffer, float cx, float cy, const VisualConfig& visual, u16 color);
-    void render_roll_indicators(u16* buffer, float roll_deg, const VisualConfig& visual, u16 color);
+    bool underscan_active();
+    raster::Surface surface_for_slot(s32 slot);
+    Result draw_slot(const DotFrame* frame, bool& presented);
+    void teardown();
 };
 
 } // namespace kinestop

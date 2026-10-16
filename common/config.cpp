@@ -1,10 +1,18 @@
+// Kinestop configuration (config.ini) load/save.
+//
+// Original Kinestop by SertAy (https://github.com/sertay1/Kinestop).
+// This stdio rewrite of the original ifstream-based parser is part of the
+// sysmodule/overlay split, a modification of the original project: the
+// sysmodule links this file too, and iostreams/std::string would cost it far
+// more memory than the parser itself.
+
 #include "config.hpp"
-#include <fstream>
-#include <sstream>
-#include <iostream>
-#include <algorithm>
+
 #include <cctype>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <sys/stat.h>
 
 #if defined(_WIN32)
@@ -17,59 +25,90 @@
 
 namespace kinestop {
 
-const char* Config::DEFAULT_PATH = "sdmc:/config/kinestop/config.ini";
+namespace {
 
-static inline std::string trim(const std::string& str) {
-    auto first = str.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) return "";
-    auto last = str.find_last_not_of(" \t\r\n");
-    return str.substr(first, (last - first + 1));
+constexpr size_t LINE_MAX_LEN = 256;
+constexpr size_t PATH_MAX_LEN = 512;
+
+// In-place trim; returns the first non-space character.
+char* trim(char* s) {
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') ++s;
+    size_t len = std::strlen(s);
+    while (len > 0 && (s[len - 1] == ' ' || s[len - 1] == '\t' || s[len - 1] == '\r' || s[len - 1] == '\n'))
+        s[--len] = '\0';
+    return s;
 }
 
-static inline std::string to_lower(const std::string& str) {
-    std::string result = str;
-    std::transform(result.begin(), result.end(), result.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-    return result;
+void to_lower(char* s) {
+    for (; *s; ++s) *s = (char)std::tolower((unsigned char)*s);
 }
 
-static inline bool parse_bool(const std::string& val, bool default_val = false) {
-    std::string s = to_lower(trim(val));
-    if (s == "true" || s == "1" || s == "yes" || s == "on") return true;
-    if (s == "false" || s == "0" || s == "no" || s == "off") return false;
+bool parse_bool(const char* val, bool default_val) {
+    char buf[8];
+    size_t n = std::strlen(val);
+    if (n == 0 || n >= sizeof(buf)) return default_val;
+    std::memcpy(buf, val, n + 1);
+    to_lower(buf);
+    if (!std::strcmp(buf, "true") || !std::strcmp(buf, "1") || !std::strcmp(buf, "yes") || !std::strcmp(buf, "on")) return true;
+    if (!std::strcmp(buf, "false") || !std::strcmp(buf, "0") || !std::strcmp(buf, "no") || !std::strcmp(buf, "off")) return false;
     return default_val;
 }
 
-static inline int parse_int(const std::string& val, int default_val = 0) {
-    std::string s = trim(val);
-    if (s.empty()) return default_val;
-    char* endptr = nullptr;
-    long result = std::strtol(s.c_str(), &endptr, 10);
-    if (endptr == s.c_str()) return default_val;
-    return static_cast<int>(result);
+int parse_int(const char* val, int default_val) {
+    if (!*val) return default_val;
+    char* end = nullptr;
+    long result = std::strtol(val, &end, 10);
+    if (end == val) return default_val;
+    if (result > 1000000L) result = 1000000L;   // keep the int cast well-defined;
+    if (result < -1000000L) result = -1000000L; // sanitize() clamps further
+    return (int)result;
 }
 
-static inline float parse_float(const std::string& val, float default_val = 0.0f) {
-    std::string s = trim(val);
-    if (s.empty()) return default_val;
-    char* endptr = nullptr;
-    float result = std::strtof(s.c_str(), &endptr);
-    if (endptr == s.c_str()) return default_val;
+float parse_float(const char* val, float default_val) {
+    if (!*val) return default_val;
+    char* end = nullptr;
+    float result = std::strtof(val, &end);
+    if (end == val || std::isnan(result)) return default_val;
     return result;
 }
 
-static void ensure_dir_exists(const std::string& path) {
-    std::string current;
-    for (size_t i = 0; i < path.length(); ++i) {
-        char c = path[i];
-        if (c == '/' || c == '\\') {
-            if (!current.empty() && current != "sdmc:" && current != "sdmc:/") {
-                MKDIR(current.c_str());
-            }
+int clampi(int v, int lo, int hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+// NaN maps to `fallback` (normally the field's default).
+float clampf(float v, float lo, float hi, float fallback) {
+    if (std::isnan(v)) return fallback;
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+// Creates every parent directory of `filepath` (not the file itself).
+void ensure_parent_dirs(const char* filepath) {
+    char current[PATH_MAX_LEN];
+    size_t len = std::strlen(filepath);
+    if (len >= sizeof(current)) return;
+
+    for (size_t i = 0; i < len; ++i) {
+        char c = filepath[i];
+        if ((c == '/' || c == '\\') && i > 0) {
+            current[i] = '\0';
+            // Skip the device root ("sdmc:") and empty components.
+            if (current[i - 1] != ':' && current[i - 1] != '/' && current[i - 1] != '\\')
+                MKDIR(current);
         }
-        current += c;
+        current[i] = c;
     }
 }
+
+// "sdmc:/foo" -> "/foo". Used as a fallback when the sdmc: device prefix is
+// not understood (host builds).
+const char* strip_device(const char* filepath) {
+    return std::strncmp(filepath, "sdmc:", 5) == 0 ? filepath + 5 : nullptr;
+}
+
+const char* bool_str(bool b) { return b ? "true" : "false"; }
+
+} // namespace
 
 void Config::set_defaults() {
     general.enabled = true;
@@ -82,8 +121,7 @@ void Config::set_defaults() {
     visual.opacity = 0.80f;
     visual.line_thickness = 3;
     visual.free_floating = true;
-    visual.draw_center_reticle = false;
-    visual.draw_roll_indicators = false;
+    visual.show_in_captures = false;
 
     filter.alpha = 0.85f;
     filter.deadzone_deg = 0.5f;
@@ -96,107 +134,210 @@ void Config::set_defaults() {
     calibration.sensitivity_roll = 1.0f;
 }
 
-bool Config::load(const std::string& filepath) {
-    std::ifstream file(filepath);
-    if (!file.is_open()) {
-        if (filepath.rfind("sdmc:", 0) == 0) {
-            std::string alt = filepath.substr(5);
-            file.open(alt);
+void Config::sanitize() {
+    general.poll_rate_hz = clampi(general.poll_rate_hz, 10, 120);
+    general.language = clampi(general.language, 0, 1);
+
+    // Unknown styles fall back to Perimeter (0), as the original
+    // get_anchors() did with `default: case 0:`.
+    if (visual.style < 0 || visual.style > 5) visual.style = 0;
+    visual.color = clampi(visual.color, 0, 11);
+    visual.density = clampi(visual.density, 0, 3);
+    visual.opacity = clampf(visual.opacity, 0.10f, 1.0f, 0.80f);
+    visual.line_thickness = clampi(visual.line_thickness, 0, 9);
+
+    // The UI only offers 0.50..0.97 (dots::SMOOTHINGS); the filter itself is
+    // well-defined for anything below 1.0, so hand-edited values are allowed.
+    filter.alpha = clampf(filter.alpha, 0.0f, 0.999f, 0.85f);
+    filter.deadzone_deg = clampf(filter.deadzone_deg, 0.0f, 5.0f, 0.5f);
+
+    // Calibration offsets are angles from the filter: any finite value is valid.
+    if (!std::isfinite(calibration.pitch_offset)) calibration.pitch_offset = 0.0f;
+    if (!std::isfinite(calibration.roll_offset)) calibration.roll_offset = 0.0f;
+    calibration.sensitivity_pitch = clampf(calibration.sensitivity_pitch, 0.2f, 6.0f, 1.0f);
+    calibration.sensitivity_roll = clampf(calibration.sensitivity_roll, 0.2f, 6.0f, 1.0f);
+}
+
+bool Config::load(const char* filepath) {
+    set_defaults();
+
+    FILE* file = std::fopen(filepath, "r");
+    if (!file) {
+        const char* alt = strip_device(filepath);
+        if (alt) file = std::fopen(alt, "r");
+    }
+    if (!file) return false;
+
+    enum Section { None, General, Visual, Filter, Calibration } section = None;
+    char raw[LINE_MAX_LEN];
+
+    while (std::fgets(raw, sizeof(raw), file)) {
+        // An over-long line arrives in several chunks; drop the remainder so
+        // its tail is not parsed as a line of its own.
+        size_t raw_len = std::strlen(raw);
+        if (raw_len == sizeof(raw) - 1 && raw[raw_len - 1] != '\n') {
+            int c;
+            while ((c = std::fgetc(file)) != EOF && c != '\n') {}
         }
-    }
-    if (!file.is_open()) {
-        set_defaults();
-        return false;
-    }
 
-    std::string line;
-    std::string current_section;
+        char* line = trim(raw);
+        if (!*line || *line == ';' || *line == '#') continue;
 
-    while (std::getline(file, line)) {
-        line = trim(line);
-        if (line.empty() || line[0] == ';' || line[0] == '#') continue;
-
-        if (line.front() == '[' && line.back() == ']') {
-            current_section = to_lower(line.substr(1, line.length() - 2));
+        size_t len = std::strlen(line);
+        if (line[0] == '[' && line[len - 1] == ']') {
+            line[len - 1] = '\0';
+            char* name = trim(line + 1);
+            to_lower(name);
+            if (!std::strcmp(name, "general")) section = General;
+            else if (!std::strcmp(name, "visual")) section = Visual;
+            else if (!std::strcmp(name, "filter")) section = Filter;
+            else if (!std::strcmp(name, "calibration")) section = Calibration;
+            else section = None;
             continue;
         }
 
-        auto eq_pos = line.find('=');
-        if (eq_pos == std::string::npos) continue;
+        char* eq = std::strchr(line, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        char* key = trim(line);
+        const char* val = trim(eq + 1);
+        to_lower(key);
 
-        std::string key = to_lower(trim(line.substr(0, eq_pos)));
-        std::string val = trim(line.substr(eq_pos + 1));
-
-        if (current_section == "general") {
-            if (key == "enabled") general.enabled = parse_bool(val, general.enabled);
-            else if (key == "poll_rate_hz") general.poll_rate_hz = parse_int(val, general.poll_rate_hz);
-            else if (key == "language") general.language = parse_int(val, general.language);
-        } else if (current_section == "visual") {
-            if (key == "style") visual.style = parse_int(val, visual.style);
-            else if (key == "color") visual.color = parse_int(val, visual.color);
-            else if (key == "density") visual.density = parse_int(val, visual.density);
-            else if (key == "opacity") visual.opacity = parse_float(val, visual.opacity);
-            else if (key == "line_thickness") visual.line_thickness = parse_int(val, visual.line_thickness);
-            else if (key == "free_floating") visual.free_floating = parse_bool(val, visual.free_floating);
-        } else if (current_section == "filter") {
-            if (key == "alpha") filter.alpha = parse_float(val, filter.alpha);
-            else if (key == "deadzone_deg") filter.deadzone_deg = parse_float(val, filter.deadzone_deg);
-        } else if (current_section == "calibration") {
-            if (key == "pitch_offset") calibration.pitch_offset = parse_float(val, calibration.pitch_offset);
-            else if (key == "roll_offset") calibration.roll_offset = parse_float(val, calibration.roll_offset);
-            else if (key == "invert_pitch") calibration.invert_pitch = parse_bool(val, calibration.invert_pitch);
-            else if (key == "invert_roll") calibration.invert_roll = parse_bool(val, calibration.invert_roll);
-            else if (key == "sensitivity_pitch") calibration.sensitivity_pitch = parse_float(val, calibration.sensitivity_pitch);
-            else if (key == "sensitivity_roll") calibration.sensitivity_roll = parse_float(val, calibration.sensitivity_roll);
+        // Unknown keys (including legacy ones such as draw_center_reticle and
+        // draw_roll_indicators) are ignored silently.
+        switch (section) {
+            case General:
+                if (!std::strcmp(key, "enabled")) general.enabled = parse_bool(val, general.enabled);
+                else if (!std::strcmp(key, "poll_rate_hz")) general.poll_rate_hz = parse_int(val, general.poll_rate_hz);
+                else if (!std::strcmp(key, "language")) general.language = parse_int(val, general.language);
+                break;
+            case Visual:
+                if (!std::strcmp(key, "style")) visual.style = parse_int(val, visual.style);
+                else if (!std::strcmp(key, "color")) visual.color = parse_int(val, visual.color);
+                else if (!std::strcmp(key, "density")) visual.density = parse_int(val, visual.density);
+                else if (!std::strcmp(key, "opacity")) visual.opacity = parse_float(val, visual.opacity);
+                else if (!std::strcmp(key, "line_thickness")) visual.line_thickness = parse_int(val, visual.line_thickness);
+                else if (!std::strcmp(key, "free_floating")) visual.free_floating = parse_bool(val, visual.free_floating);
+                else if (!std::strcmp(key, "show_in_captures")) visual.show_in_captures = parse_bool(val, visual.show_in_captures);
+                break;
+            case Filter:
+                if (!std::strcmp(key, "alpha")) filter.alpha = parse_float(val, filter.alpha);
+                else if (!std::strcmp(key, "deadzone_deg")) filter.deadzone_deg = parse_float(val, filter.deadzone_deg);
+                break;
+            case Calibration:
+                if (!std::strcmp(key, "pitch_offset")) calibration.pitch_offset = parse_float(val, calibration.pitch_offset);
+                else if (!std::strcmp(key, "roll_offset")) calibration.roll_offset = parse_float(val, calibration.roll_offset);
+                else if (!std::strcmp(key, "invert_pitch")) calibration.invert_pitch = parse_bool(val, calibration.invert_pitch);
+                else if (!std::strcmp(key, "invert_roll")) calibration.invert_roll = parse_bool(val, calibration.invert_roll);
+                else if (!std::strcmp(key, "sensitivity_pitch")) calibration.sensitivity_pitch = parse_float(val, calibration.sensitivity_pitch);
+                else if (!std::strcmp(key, "sensitivity_roll")) calibration.sensitivity_roll = parse_float(val, calibration.sensitivity_roll);
+                break;
+            case None:
+                break;
         }
     }
 
+    std::fclose(file);
+    sanitize();
     return true;
 }
 
-bool Config::save(const std::string& filepath) const {
-    ensure_dir_exists(filepath);
+bool Config::save(const char* filepath) const {
+    ensure_parent_dirs(filepath);
 
-    std::ofstream file(filepath);
-    if (!file.is_open()) {
-        if (filepath.rfind("sdmc:", 0) == 0) {
-            std::string alt = filepath.substr(5);
-            ensure_dir_exists(alt);
-            file.open(alt);
+    FILE* file = std::fopen(filepath, "w");
+    if (!file) {
+        const char* alt = strip_device(filepath);
+        if (alt) {
+            ensure_parent_dirs(alt);
+            file = std::fopen(alt, "w");
         }
     }
-    if (!file.is_open()) return false;
+    if (!file) return false;
 
-    file << "; ==========================================\n";
-    file << "; Kinestop Configuration (by SertAy)\n";
-    file << "; ==========================================\n\n";
+    // %g matches the default ostream float formatting the original used.
+    std::fprintf(file,
+        "; ==========================================\n"
+        "; Kinestop Configuration (by SertAy)\n"
+        "; ==========================================\n\n");
 
-    file << "[general]\n";
-    file << "enabled = " << (general.enabled ? "true" : "false") << "\n";
-    file << "poll_rate_hz = " << general.poll_rate_hz << "\n";
-    file << "language = " << general.language << "\n\n";
+    std::fprintf(file, "[general]\n");
+    std::fprintf(file, "enabled = %s\n", bool_str(general.enabled));
+    std::fprintf(file, "poll_rate_hz = %d\n", general.poll_rate_hz);
+    std::fprintf(file, "language = %d\n\n", general.language);
 
-    file << "[visual]\n";
-    file << "style = " << visual.style << "\n";
-    file << "color = " << visual.color << "\n";
-    file << "density = " << visual.density << "\n";
-    file << "opacity = " << visual.opacity << "\n";
-    file << "line_thickness = " << visual.line_thickness << "\n";
-    file << "free_floating = " << (visual.free_floating ? "true" : "false") << "\n\n";
+    std::fprintf(file, "[visual]\n");
+    std::fprintf(file, "style = %d\n", visual.style);
+    std::fprintf(file, "color = %d\n", visual.color);
+    std::fprintf(file, "density = %d\n", visual.density);
+    std::fprintf(file, "opacity = %g\n", (double)visual.opacity);
+    std::fprintf(file, "line_thickness = %d\n", visual.line_thickness);
+    std::fprintf(file, "free_floating = %s\n", bool_str(visual.free_floating));
+    std::fprintf(file, "show_in_captures = %s\n\n", bool_str(visual.show_in_captures));
 
-    file << "[filter]\n";
-    file << "alpha = " << filter.alpha << "\n";
-    file << "deadzone_deg = " << filter.deadzone_deg << "\n\n";
+    std::fprintf(file, "[filter]\n");
+    std::fprintf(file, "alpha = %g\n", (double)filter.alpha);
+    std::fprintf(file, "deadzone_deg = %g\n\n", (double)filter.deadzone_deg);
 
-    file << "[calibration]\n";
-    file << "pitch_offset = " << calibration.pitch_offset << "\n";
-    file << "roll_offset = " << calibration.roll_offset << "\n";
-    file << "invert_pitch = " << (calibration.invert_pitch ? "true" : "false") << "\n";
-    file << "invert_roll = " << (calibration.invert_roll ? "true" : "false") << "\n";
-    file << "sensitivity_pitch = " << calibration.sensitivity_pitch << "\n";
-    file << "sensitivity_roll = " << calibration.sensitivity_roll << "\n";
+    std::fprintf(file, "[calibration]\n");
+    std::fprintf(file, "pitch_offset = %g\n", (double)calibration.pitch_offset);
+    std::fprintf(file, "roll_offset = %g\n", (double)calibration.roll_offset);
+    std::fprintf(file, "invert_pitch = %s\n", bool_str(calibration.invert_pitch));
+    std::fprintf(file, "invert_roll = %s\n", bool_str(calibration.invert_roll));
+    std::fprintf(file, "sensitivity_pitch = %g\n", (double)calibration.sensitivity_pitch);
+    std::fprintf(file, "sensitivity_roll = %g\n", (double)calibration.sensitivity_roll);
 
-    return true;
+    bool ok = !std::ferror(file);
+    if (std::fclose(file) != 0) ok = false;
+    return ok;
+}
+
+void Config::to_wire(KinestopWireConfig& out) const {
+    Config c = *this;
+    c.sanitize();
+
+    std::memset(&out, 0, sizeof(out));
+    out.style = (uint8_t)c.visual.style;
+    out.color = (uint8_t)c.visual.color;
+    out.density = (uint8_t)c.visual.density;
+    out.dot_size = (uint8_t)c.visual.line_thickness;
+    out.free_floating = c.visual.free_floating ? 1 : 0;
+    out.invert_pitch = c.calibration.invert_pitch ? 1 : 0;
+    out.invert_roll = c.calibration.invert_roll ? 1 : 0;
+    out.show_in_captures = c.visual.show_in_captures ? 1 : 0;
+    out.poll_rate_hz = (uint16_t)c.general.poll_rate_hz;
+    out.opacity = c.visual.opacity;
+    out.filter_alpha = c.filter.alpha;
+    out.deadzone_deg = c.filter.deadzone_deg;
+    out.pitch_offset = c.calibration.pitch_offset;
+    out.roll_offset = c.calibration.roll_offset;
+    out.sensitivity_pitch = c.calibration.sensitivity_pitch;
+    out.sensitivity_roll = c.calibration.sensitivity_roll;
+}
+
+void Config::from_wire(const KinestopWireConfig& in) {
+    visual.style = in.style;
+    visual.color = in.color;
+    visual.density = in.density;
+    visual.line_thickness = in.dot_size;
+    visual.free_floating = in.free_floating != 0;
+    visual.show_in_captures = in.show_in_captures != 0;
+    visual.opacity = in.opacity;
+
+    filter.alpha = in.filter_alpha;
+    filter.deadzone_deg = in.deadzone_deg;
+
+    calibration.pitch_offset = in.pitch_offset;
+    calibration.roll_offset = in.roll_offset;
+    calibration.invert_pitch = in.invert_pitch != 0;
+    calibration.invert_roll = in.invert_roll != 0;
+    calibration.sensitivity_pitch = in.sensitivity_pitch;
+    calibration.sensitivity_roll = in.sensitivity_roll;
+
+    // The only general.* field carried on the wire.
+    general.poll_rate_hz = in.poll_rate_hz;
+
+    sanitize();
 }
 
 } // namespace kinestop

@@ -1,65 +1,93 @@
 #---------------------------------------------------------------------------------
+# Kinestop sysmodule (dot renderer). Modification of the original Kinestop by
+# SertAy (https://github.com/sertay1/Kinestop); build layout follows ChargeCap.
+#
+# Output: out/kinestop.nsp (exefs PFS0 holding main + main.npdm), installed as
+# atmosphere/contents/4200000000001042/exefs.nsp.
+#---------------------------------------------------------------------------------
 .SUFFIXES:
 #---------------------------------------------------------------------------------
 
 ifeq ($(strip $(DEVKITPRO)),)
-$(error "Please set DEVKITPRO in your environment. export DEVKITPRO=<path to>/devkitpro")
+$(error "Please set DEVKITPRO in your environment. export DEVKITPRO=/opt/devkitpro")
 endif
 
 TOPDIR ?= $(CURDIR)
 include $(DEVKITPRO)/libnx/switch_rules
 
-TARGET      := kinestop
-BUILD       := build
-SOURCES     := source ../common
-DATA        := data
-INCLUDES    := include source ../common
+#---------------------------------------------------------------------------------
+TARGET   := kinestop
+BUILD    := build
+OUTDIR   := out
+SOURCES  := source ../common
+INCLUDES := source ../common
+EXEFS_SRC := exefs_src
 
-ARCH    := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
+# Only these are taken from ../common (the overlay owns everything else there).
+COMMON_CPPFILES := config.cpp dots.cpp
 
-CFLAGS  := -g -Wall -O2 -ffunction-sections $(ARCH) $(DEFINES)
-CFLAGS  += $(INCLUDE) -D__SWITCH__
+APP_VERSION := 2.0.0
 
-CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=c++20
+#---------------------------------------------------------------------------------
+# options for code generation
+#---------------------------------------------------------------------------------
+DEFINES := -DAPP_VERSION="\"$(APP_VERSION)\""
 
-ASFLAGS := -g $(ARCH)
-LDFLAGS = -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+ARCH := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
-LIBS    := -lnx
+# -Os plus aggressive section splitting: this module lives in the System pool
+# and should be as small as the toolchain will let it be.
+CFLAGS := -Wall -Wextra -Os \
+	-ffunction-sections -fdata-sections -fomit-frame-pointer \
+	-fno-asynchronous-unwind-tables -fno-unwind-tables -fno-stack-protector \
+	$(ARCH) $(DEFINES)
+
+CFLAGS += $(INCLUDE) -D__SWITCH__
+
+CXXFLAGS := $(CFLAGS) -std=gnu++20 -fno-rtti -fno-exceptions -fno-threadsafe-statics
+CFLAGS   += -std=gnu11
+
+ASFLAGS := $(ARCH)
+LDFLAGS  = -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) -Wl,-Map,$(notdir $*.map) \
+	-Wl,--gc-sections -Wl,--as-needed
+
+LIBS := -lnx
 
 LIBDIRS := $(PORTLIBS) $(LIBNX)
 
+#---------------------------------------------------------------------------------
 ifneq ($(BUILD),$(notdir $(CURDIR)))
+#---------------------------------------------------------------------------------
 
-export OUTPUT   := $(CURDIR)/$(TARGET)
-export TOPDIR   := $(CURDIR)
+export OUTPUT := $(CURDIR)/$(OUTDIR)/$(TARGET)
+export TOPDIR := $(CURDIR)
 
-export VPATH    := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
-                   $(foreach dir,$(DATA),$(CURDIR)/$(dir))
+export VPATH := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir))
 
-export DEPSDIR  := $(CURDIR)/$(BUILD)
+export DEPSDIR := $(CURDIR)/$(BUILD)
 
-CFILES      := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(CURDIR)/$(dir)/*.c)))
-CPPFILES    := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(CURDIR)/$(dir)/*.cpp)))
-SFILES      := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(CURDIR)/$(dir)/*.s)))
-BINFILES    := $(foreach dir,$(DATA),$(notdir $(wildcard $(CURDIR)/$(dir)/*.*)))
+CFILES   := $(notdir $(wildcard source/*.c))
+CPPFILES := $(notdir $(wildcard source/*.cpp)) $(COMMON_CPPFILES)
+SFILES   := $(notdir $(wildcard source/*.s))
 
 ifeq ($(strip $(CPPFILES)),)
-    export LD   := $(CC)
+	export LD := $(CC)
 else
-    export LD   := $(CXX)
+	export LD := $(CXX)
 endif
 
-export OFILES_BIN   := $(addsuffix .o,$(BINFILES))
-export OFILES_SRC   := $(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
-export OFILES       := $(OFILES_BIN) $(OFILES_SRC)
-export HFILES_BIN   := $(addsuffix .h,$(subst .,_,$(BINFILES)))
+export OFILES := $(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
 
-export INCLUDE  := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
-                   $(foreach dir,$(LIBDIRS),-I$(dir)/include) \
-                   -I$(CURDIR)/$(BUILD)
+# libnx/portlibs as system headers: -Wextra stays on for our code without
+# drowning the build in warnings from libnx's C headers compiled as C++.
+export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
+	$(foreach dir,$(LIBDIRS),-isystem $(dir)/include) \
+	-I$(CURDIR)/$(BUILD)
 
 export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+
+export BUILD_EXEFS_SRC := $(TOPDIR)/$(EXEFS_SRC)
+export APP_JSON := $(TOPDIR)/kinestop.json
 
 .PHONY: $(BUILD) clean all
 
@@ -67,43 +95,31 @@ all: $(BUILD)
 
 $(BUILD):
 	@[ -d $@ ] || mkdir -p $@
-	@$(MAKE) --no-print-directory -C $(BUILD) -f "$(TOPDIR)/Makefile"
+	@[ -d $(OUTDIR) ] || mkdir -p $(OUTDIR)
+	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
 clean:
-	@rm -fr $(BUILD) $(TARGET).elf $(TARGET).nso $(TARGET).npdm main main.npdm $(TARGET).map
+	@echo clean ...
+	@rm -fr $(BUILD) $(OUTDIR) main main.npdm
 
+#---------------------------------------------------------------------------------
 else
+.PHONY: all
 
 DEPENDS := $(OFILES:.o=.d)
 
-all: $(TOPDIR)/main $(TOPDIR)/main.npdm
+all: $(OUTPUT).nsp
 
-$(TOPDIR)/main: $(OUTPUT).nso
-	@cp $< $@
-	@echo "Created ... $(notdir $@)"
-
-$(TOPDIR)/main.npdm: $(OUTPUT).npdm
-	@cp $< $@
-	@echo "Created ... $(notdir $@)"
+$(OUTPUT).nsp: $(OUTPUT).nso $(OUTPUT).npdm
 
 $(OUTPUT).nso: $(OUTPUT).elf
-	@elf2nso $< $@
-	@echo "built ... $(notdir $@)"
 
-$(OUTPUT).npdm: $(TOPDIR)/kinestop.json
-	@npdmtool $< $@
-	@echo "built ... $(notdir $@)"
+$(OUTPUT).npdm: $(APP_JSON)
 
 $(OUTPUT).elf: $(OFILES)
-	@echo Linking $@...
-	$(LD) $(LDFLAGS) $(OFILES) $(LIBPATHS) $(LIBS) -o $@
-
-$(OFILES_SRC): $(HFILES_BIN)
-
-%.o: %.cpp
-	@echo Compiling $<...
-	$(CXX) -MMD -MP -MF $(DEPSDIR)/$*.d $(CXXFLAGS) $(INCLUDE) -c $< -o $@
 
 -include $(DEPENDS)
 
+#---------------------------------------------------------------------------------
 endif
+#---------------------------------------------------------------------------------

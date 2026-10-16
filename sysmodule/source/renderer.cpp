@@ -1,444 +1,309 @@
+// Kinestop sysmodule - VI layer + framebuffer that shows the motion-cue dots.
+//
+// Original Kinestop by SertAy (https://github.com/sertay1/Kinestop). The
+// sysmodule/overlay split is a modification of the original project.
+//
+// Layer setup mirrors libtesla's Renderer::init() (tesla.hpp), which is known
+// to work from an AppletType_None process (nx-ovlloader):
+//   viInitialize(Manager) -> viOpenDefaultDisplay -> viCreateManagedLayer
+//   -> viCreateLayer -> FitToLayer -> Z -> AddToLayerStack (cmd 6000)
+//   -> viSetLayerSize/Position -> nwindowCreateFromLayer -> framebufferCreate
+// Differences, all deliberate:
+//   * Z is one below the maximum so Tesla's own UI (which takes the maximum)
+//     stays above the dots.
+//   * Screenshot/Recording stacks only when show_in_captures is set. Stack
+//     membership is fixed at creation, so changing it re-creates the layer.
+//     libtesla also joins Arbitrary (am captures), LastFrame (applet-
+//     transition snapshot), ApplicationForDebug (creport/debug captures) and
+//     Null (the stack of the empty display). None of them is needed for the
+//     LCD or a TV (Default + Lcd), so we leave them out.
+//   * The framebuffer is 640x360 and the layer is the whole 1920x1080 VI
+//     space, so VI upscales it 3x (FitToLayer).
+//   * Buffers are dequeued/queued by hand instead of framebufferBegin/End,
+//     which call diagAbortWithResult() on failure. Here a failure just tears
+//     the layer down so the main loop can retry.
+//   * The dequeue is preceded by a bounded wait on the buffer-release event
+//     (nwindowDequeueBuffer() itself waits forever), and only the GOBs that
+//     were written are flushed from the data cache, not the whole slot.
+
 #include "renderer.hpp"
-#include <cmath>
+
 #include <cstring>
-#include <algorithm>
-#include <cstdio>
-#include <cstdarg>
 
 extern "C" u64 __nx_vi_layer_id;
 
 namespace kinestop {
 
-static void log_renderer(const char* fmt, ...) {
-    FILE* f = fopen("sdmc:/config/kinestop/sysmodule.log", "a");
-    if (f) {
-        va_list args;
-        va_start(args, fmt);
-        vfprintf(f, fmt, args);
-        va_end(args);
-        fprintf(f, "\n");
-        fclose(f);
-    }
+namespace {
+
+// How long a present waits for the compositor to release a buffer before it
+// skips the frame (the main loop tries again next iteration). With two
+// buffers and vsync a release is normally at most one refresh (~17 ms) away.
+constexpr u64 DEQUEUE_TIMEOUT_NS = 100000000ULL;  // 100 ms
+
+// Cleans + invalidates the cache lines of every GOB (32x8 px, 512 B) that
+// overlaps `r`. Every CPU write to a slot happens inside such a rectangle
+// (clear_rect() / draw_dot()), so this is all the GPU needs to see.
+void flush_rect(const raster::Surface& s, const raster::Rect& r) {
+    if (r.empty()) return;
+    for (u32 gy = (u32)r.y0 & ~7u; gy < (u32)r.y1; gy += swizzle::GOB_HEIGHT)
+        for (u32 gx = (u32)r.x0 & ~31u; gx < (u32)r.x1; gx += swizzle::GOB_WIDTH_16BPP)
+            armDCacheFlush(s.pixels + swizzle::gob_offset_16bpp(gx, gy, s.width), swizzle::GOB_BYTES);
 }
 
-// Blocklinear swizzle offset calculation for 16-bit RGBA4444 (width = 1280)
-static inline u32 get_pixel_offset_4444(u32 x, u32 y) {
-    constexpr u32 offset_w = 320; // (((1280 / 2) >> 4) << 3)
-    return ((((y & 127) >> 4) + ((x >> 5) << 3) + ((y >> 7) * offset_w)) << 9) +
-           ((y & 8) << 5) + ((x & 16) << 3) + ((y & 6) << 4) + 
-           ((x & 8) << 1) + ((y & 1) << 3) + (x & 7);
-}
+} // namespace
 
-OverlayRenderer::OverlayRenderer()
-    : m_initialized(false)
+Renderer::Renderer()
+    : m_vi_ok(false)
+    , m_display_ok(false)
+    , m_managed_ok(false)
+    , m_layer_ok(false)
+    , m_nwin_ok(false)
+    , m_fb_ok(false)
+    , m_in_captures(false)
+    , m_underscan_z(false)
+    , m_normal_z(0)
+    , m_soft_rc(0)
 {
     std::memset(&m_display, 0, sizeof(m_display));
     std::memset(&m_layer, 0, sizeof(m_layer));
-    std::memset(&m_nwindow, 0, sizeof(m_nwindow));
-    std::memset(&m_framebuffer, 0, sizeof(m_framebuffer));
-    std::memset(&m_vsync_event, 0, sizeof(m_vsync_event));
+    std::memset(&m_window, 0, sizeof(m_window));
+    std::memset(&m_fb, 0, sizeof(m_fb));
+    std::memset(m_dirty_count, 0, sizeof(m_dirty_count));
 }
 
-OverlayRenderer::~OverlayRenderer() {
-    exit();
-}
-
-Result OverlayRenderer::add_to_layer_stack(ViLayerStack stack) {
-    Service* srv = viGetSession_IManagerDisplayService();
-    if (!serviceIsActive(srv)) {
-        return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
-    }
-
+// IManagerDisplayService::AddToLayerStack, same as tsl::hlp::viAddToLayerStack.
+Result Renderer::add_to_layer_stack(ViLayerStack stack) {
     const struct {
         u32 stack;
         u64 layerId;
     } in = { (u32)stack, m_layer.layer_id };
 
-    return serviceDispatchIn(srv, 6000, in);
+    return serviceDispatchIn(viGetSession_IManagerDisplayService(), 6000, in);
 }
 
-bool OverlayRenderer::init() {
-    if (m_initialized) return true;
+// libtesla: getUnderscanPixels() is non-zero only when docked
+// (ult::consoleIsDocked(): apm performance mode == Boost) and the TV settings
+// have underscan set.
+bool Renderer::underscan_active() {
+    ApmPerformanceMode mode = ApmPerformanceMode_Invalid;
+    if (R_FAILED(apmGetPerformanceMode(&mode)) || mode != ApmPerformanceMode_Boost)
+        return false;
 
-    log_renderer("Renderer: Starting init...");
+    SetSysTvSettings tv;
+    if (R_FAILED(setsysGetTvSettings(&tv)))
+        return false;
+    return tv.underscan != 0;
+}
 
-    // 1. Initialize VI service
-    Result rc = viInitialize(ViServiceType_Manager);
-    log_renderer("Renderer: viInitialize Manager rc=0x%X", rc);
-    if (R_FAILED(rc)) {
-        rc = viInitialize(ViServiceType_System);
-        log_renderer("Renderer: fallback viInitialize System rc=0x%X", rc);
-        if (R_FAILED(rc)) {
-            rc = viInitialize(ViServiceType_Application);
-            log_renderer("Renderer: fallback viInitialize Application rc=0x%X", rc);
-            if (R_FAILED(rc)) {
-                log_renderer("Renderer: FATAL - Could not initialize VI service");
-                return false;
-            }
-        }
-    }
+Result Renderer::update_z() {
+    if (!m_layer_ok) return 0;
+    bool active = underscan_active();
+    if (active == m_underscan_z) return 0;
 
-    // 2. Open default system display
+    // On failure m_underscan_z is left as is, so the next call retries.
+    Result rc = viSetLayerZ(&m_layer, active ? UNDERSCAN_Z : m_normal_z);
+    if (R_SUCCEEDED(rc)) m_underscan_z = active;
+    return rc;
+}
+
+Result Renderer::init(bool show_in_captures, KinestopStage& stage) {
+    if (m_fb_ok) return 0;
+    teardown();  // clean slate if a previous attempt got partway
+    m_soft_rc = 0;
+
+    Result rc;
+
+    stage = KinestopStage_ViInit;
+    rc = viInitialize(ViServiceType_Manager);
+    if (R_FAILED(rc)) goto fail;
+    m_vi_ok = true;
+
+    stage = KinestopStage_Display;
     rc = viOpenDefaultDisplay(&m_display);
-    log_renderer("Renderer: viOpenDefaultDisplay rc=0x%X", rc);
-    if (R_FAILED(rc)) {
-        viExit();
-        return false;
-    }
+    if (R_FAILED(rc)) goto fail;
+    m_display_ok = true;
 
-    // 3. Create managed layer
+    stage = KinestopStage_Layer;
+    __nx_vi_layer_id = 0;
     rc = viCreateManagedLayer(&m_display, static_cast<ViLayerFlags>(0), 0, &__nx_vi_layer_id);
-    log_renderer("Renderer: viCreateManagedLayer rc=0x%X, layer_id=0x%llX", rc, (unsigned long long)__nx_vi_layer_id);
-    if (R_FAILED(rc)) {
-        viCloseDisplay(&m_display);
-        viExit();
-        return false;
+    if (R_FAILED(rc)) goto fail;
+    m_managed_ok = true;
+
+    rc = viCreateLayer(&m_display, &m_layer);  // opens __nx_vi_layer_id
+    if (R_FAILED(rc)) goto fail;
+    m_layer_ok = true;
+
+    rc = viSetLayerScalingMode(&m_layer, ViScalingMode_FitToLayer);
+    if (R_FAILED(rc)) goto fail;
+
+    {
+        s32 z_max = 0;
+        if (R_SUCCEEDED(viGetZOrderCountMax(&m_display, &z_max)) && z_max > 0)
+            m_normal_z = z_max - 1;
+        else
+            m_normal_z = 254;  // libtesla falls back to 255 for itself
+        m_underscan_z = underscan_active();
+        rc = viSetLayerZ(&m_layer, m_underscan_z ? UNDERSCAN_Z : m_normal_z);
+        if (R_FAILED(rc)) goto fail;
     }
 
-    // 4. Create the layer instance
-    rc = viCreateLayer(&m_display, &m_layer);
-    log_renderer("Renderer: viCreateLayer rc=0x%X, layer_id=0x%llX", rc, (unsigned long long)m_layer.layer_id);
-    if (R_FAILED(rc)) {
-        viDestroyManagedLayer(&m_layer);
-        viCloseDisplay(&m_display);
-        viExit();
-        return false;
+    stage = KinestopStage_LayerStack;
+    rc = add_to_layer_stack(ViLayerStack_Default);
+    if (R_FAILED(rc)) goto fail;
+    rc = add_to_layer_stack(ViLayerStack_Lcd);
+    if (R_FAILED(rc)) goto fail;
+    if (show_in_captures) {
+        // Not fatal: the dots still show on screen without these.
+        Result rc2 = add_to_layer_stack(ViLayerStack_Screenshot);
+        if (R_FAILED(rc2)) m_soft_rc = rc2;
+        rc2 = add_to_layer_stack(ViLayerStack_Recording);
+        if (R_FAILED(rc2)) m_soft_rc = rc2;
     }
+    m_in_captures = show_in_captures;
 
-    // 5. Set scaling and maximum Z-order
-    viSetLayerScalingMode(&m_layer, ViScalingMode_FitToLayer);
+    stage = KinestopStage_Layer;
+    rc = viSetLayerSize(&m_layer, LAYER_WIDTH, LAYER_HEIGHT);
+    if (R_FAILED(rc)) goto fail;
+    rc = viSetLayerPosition(&m_layer, 0.0f, 0.0f);
+    if (R_FAILED(rc)) goto fail;
 
-    s32 layerZ = 0;
-    if (R_SUCCEEDED(viGetZOrderCountMax(&m_display, &layerZ)) && layerZ > 0) {
-        viSetLayerZ(&m_layer, layerZ);
-    } else {
-        viSetLayerZ(&m_layer, 255);
-    }
-    log_renderer("Renderer: SetLayerZ (z=%d)", (layerZ > 0) ? layerZ : 255);
+    stage = KinestopStage_NWindow;
+    rc = nwindowCreateFromLayer(&m_window, &m_layer);
+    if (R_FAILED(rc)) goto fail;
+    m_nwin_ok = true;
+    rc = nwindowSetDimensions(&m_window, FB_WIDTH, FB_HEIGHT);
+    if (R_FAILED(rc)) goto fail;
 
-    // 6. Add layer to compositor stacks
-    Result rc_stack = add_to_layer_stack(ViLayerStack_Default);
-    log_renderer("Renderer: add_to_layer_stack Default rc=0x%X", rc_stack);
-    add_to_layer_stack(ViLayerStack_Lcd);
-    add_to_layer_stack(ViLayerStack_Screenshot);
-    add_to_layer_stack(ViLayerStack_Recording);
+    stage = KinestopStage_Framebuffer;
+    rc = framebufferCreate(&m_fb, &m_window, FB_WIDTH, FB_HEIGHT, PIXEL_FORMAT_RGBA_4444, NUM_FBS);
+    if (R_FAILED(rc)) goto fail;
+    m_fb_ok = true;
 
-    viSetLayerSize(&m_layer, SCREEN_WIDTH, SCREEN_HEIGHT);
-    viSetLayerPosition(&m_layer, 0.0f, 0.0f);
+    // framebufferCreate() does not clear the (heap) memory it hands to the GPU.
+    std::memset(m_fb.buf, 0, (size_t)m_fb.fb_size * NUM_FBS);
+    armDCacheFlush(m_fb.buf, (size_t)m_fb.fb_size * NUM_FBS);
+    std::memset(m_dirty_count, 0, sizeof(m_dirty_count));
 
-    // 7. Create Native Window from the VI layer
-    rc = nwindowCreateFromLayer(&m_nwindow, &m_layer);
-    log_renderer("Renderer: nwindowCreateFromLayer rc=0x%X", rc);
-    if (R_FAILED(rc)) {
-        viDestroyManagedLayer(&m_layer);
-        viCloseDisplay(&m_display);
-        viExit();
-        return false;
-    }
+    stage = KinestopStage_None;
+    return 0;
 
-    nwindowSetDimensions(&m_nwindow, SCREEN_WIDTH, SCREEN_HEIGHT);
-
-    // 8. Create double-buffered RGBA4444 framebuffer
-    rc = framebufferCreate(&m_framebuffer, &m_nwindow, SCREEN_WIDTH, SCREEN_HEIGHT, PIXEL_FORMAT_RGBA_4444, 2);
-    log_renderer("Renderer: framebufferCreate RGBA4444 (2 fbs) rc=0x%X", rc);
-    if (R_FAILED(rc)) {
-        rc = framebufferCreate(&m_framebuffer, &m_nwindow, SCREEN_WIDTH, SCREEN_HEIGHT, PIXEL_FORMAT_RGBA_4444, 1);
-        log_renderer("Renderer: framebufferCreate RGBA4444 (1 fb) rc=0x%X", rc);
-    }
-    if (R_FAILED(rc)) {
-        nwindowClose(&m_nwindow);
-        viDestroyManagedLayer(&m_layer);
-        viCloseDisplay(&m_display);
-        viExit();
-        return false;
-    }
-
-    m_initialized = true;
-    clear_transparent();
-    log_renderer("Renderer: Init COMPLETED SUCCESSFULLY!");
-    return true;
+fail:
+    teardown();
+    return rc;
 }
 
-void OverlayRenderer::exit() {
-    if (!m_initialized) return;
-
-    clear_transparent();
-
-    framebufferClose(&m_framebuffer);
-    nwindowClose(&m_nwindow);
-    viDestroyManagedLayer(&m_layer);
-    viCloseDisplay(&m_display);
-    eventClose(&m_vsync_event);
-    viExit();
-
-    m_initialized = false;
+raster::Surface Renderer::surface_for_slot(s32 slot) {
+    return raster::Surface{
+        reinterpret_cast<u16*>(static_cast<u8*>(m_fb.buf) + (size_t)slot * m_fb.fb_size),
+        FB_WIDTH,
+        FB_HEIGHT,
+    };
 }
 
-void OverlayRenderer::clear_transparent() {
-    if (!m_initialized) return;
+// Dequeues a slot, replaces last time's dots in it with `frame` (or with
+// nothing when frame is null) and queues it. `presented` is false when no
+// buffer was released within DEQUEUE_TIMEOUT_NS; nothing was touched then.
+Result Renderer::draw_slot(const DotFrame* frame, bool& presented) {
+    presented = false;
 
-    u32 stride = 0;
-    u16* buf = (u16*)framebufferBegin(&m_framebuffer, &stride);
-    if (buf) {
-        std::memset(buf, 0, (stride > 0 ? stride : (SCREEN_WIDTH * sizeof(u16))) * SCREEN_HEIGHT);
-        framebufferEnd(&m_framebuffer);
+    // nwindowDequeueBuffer() loops on eventWait(UINT64_MAX) until a buffer
+    // is free. Wait here first with a timeout so a compositor that stops
+    // releasing our buffers cannot block the main loop (and with it Exit).
+    // The event is remote and loaded with autoclear=false (binder.c), so
+    // this wait does not consume the signal the dequeue then waits for.
+    if (eventActive(&m_window.event) && R_FAILED(eventWait(&m_window.event, DEQUEUE_TIMEOUT_NS)))
+        return 0;
+
+    s32 slot = -1;
+    Result rc = nwindowDequeueBuffer(&m_window, &slot, nullptr);
+    if (R_FAILED(rc)) return rc;
+    if (slot < 0 || (u32)slot >= NUM_FBS) {
+        // Cannot happen with framebufferCreate(..., NUM_FBS); be defensive.
+        return MAKERESULT(Module_Libnx, LibnxError_BadGfxDequeueBuffer);
     }
-}
 
-void OverlayRenderer::draw_pixel(u16* buffer, s32 x, s32 y, u16 color) {
-    if (x >= 0 && x < (s32)SCREEN_WIDTH && y >= 0 && y < (s32)SCREEN_HEIGHT) {
-        u32 offset = get_pixel_offset_4444((u32)x, (u32)y);
-        buffer[offset] = color;
+    const raster::Surface surface = surface_for_slot(slot);
+
+    // Cleared areas are flushed right away; a dot drawn over the same GOBs
+    // dirties those lines again and they are flushed again below.
+    for (size_t i = 0; i < m_dirty_count[slot]; ++i) {
+        raster::clear_rect(surface, m_dirty[slot][i]);
+        flush_rect(surface, m_dirty[slot][i]);
     }
-}
+    m_dirty_count[slot] = 0;
 
-void OverlayRenderer::draw_line_thick(u16* buffer, float x0, float y0, float x1, float y1, int thickness, u16 color) {
-    float dx = x1 - x0;
-    float dy = y1 - y0;
-    float len = std::sqrt(dx * dx + dy * dy);
-    if (len < 1e-4f) return;
-
-    float nx = -dy / len;
-    float ny = dx / len;
-
-    int half_t = thickness / 2;
-
-    for (int t = -half_t; t <= half_t; ++t) {
-        float ox = nx * (float)t;
-        float oy = ny * (float)t;
-
-        s32 sx0 = (s32)std::round(x0 + ox);
-        s32 sy0 = (s32)std::round(y0 + oy);
-        s32 sx1 = (s32)std::round(x1 + ox);
-        s32 sy1 = (s32)std::round(y1 + oy);
-
-        s32 adx = std::abs(sx1 - sx0);
-        s32 ady = std::abs(sy1 - sy0);
-        s32 step_x = (sx0 < sx1) ? 1 : -1;
-        s32 step_y = (sy0 < sy1) ? 1 : -1;
-        s32 err = adx - ady;
-
-        s32 cx = sx0;
-        s32 cy = sy0;
-
-        while (true) {
-            draw_pixel(buffer, cx, cy, color);
-            if (cx == sx1 && cy == sy1) break;
-            s32 e2 = 2 * err;
-            if (e2 > -ady) {
-                err -= ady;
-                cx += step_x;
-            }
-            if (e2 < adx) {
-                err += adx;
-                cy += step_y;
-            }
+    if (frame) {
+        const size_t count = frame->count < dots::MAX_ANCHORS ? frame->count : dots::MAX_ANCHORS;
+        for (size_t i = 0; i < count; ++i) {
+            raster::Rect r = raster::draw_dot(surface, frame->centers[i].x, frame->centers[i].y, frame->style);
+            if (!r.empty()) m_dirty[slot][m_dirty_count[slot]++] = r;
         }
+        for (size_t i = 0; i < m_dirty_count[slot]; ++i)
+            flush_rect(surface, m_dirty[slot][i]);
     }
+
+    rc = nwindowQueueBuffer(&m_window, slot, nullptr);
+    if (R_SUCCEEDED(rc)) presented = true;
+    return rc;
 }
 
-void OverlayRenderer::draw_circle(u16* buffer, float cx, float cy, float radius, int thickness, u16 color) {
-    int r_outer = (int)std::round(radius + thickness / 2.0f);
-    int r_inner = (int)std::round(radius - thickness / 2.0f);
-    if (r_inner < 0) r_inner = 0;
+Result Renderer::present(const DotFrame& frame, KinestopStage& stage, bool& presented) {
+    presented = false;
+    if (!m_fb_ok) {
+        stage = KinestopStage_Framebuffer;
+        return MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
+    }
+    Result rc = draw_slot(&frame, presented);
+    if (R_FAILED(rc)) stage = KinestopStage_Framebuffer;
+    return rc;
+}
 
-    int min_x = std::max(0, (int)std::floor(cx - r_outer));
-    int max_x = std::min((int)SCREEN_WIDTH - 1, (int)std::ceil(cx + r_outer));
-    int min_y = std::max(0, (int)std::floor(cy - r_outer));
-    int max_y = std::min((int)SCREEN_HEIGHT - 1, (int)std::ceil(cy + r_outer));
+void Renderer::exit() {
+    if (m_fb_ok) {
+        // Leave nothing on screen even for the instant before the layer goes.
+        // Skipped (bounded wait) if the compositor is not releasing buffers.
+        bool presented;
+        draw_slot(nullptr, presented);
+    }
+    teardown();
+}
 
-    for (int y = min_y; y <= max_y; ++y) {
-        float dy = (float)y - cy;
-        for (int x = min_x; x <= max_x; ++x) {
-            float dx = (float)x - cx;
-            float dist = std::sqrt(dx * dx + dy * dy);
-            if (dist >= r_inner && dist <= r_outer) {
-                draw_pixel(buffer, x, y, color);
-            }
+// Releases whatever exists, in reverse creation order (libtesla's exit()
+// order: framebufferClose, nwindowClose, viDestroyManagedLayer,
+// viCloseDisplay, viExit).
+void Renderer::teardown() {
+    if (m_fb_ok) {
+        framebufferClose(&m_fb);
+        m_fb_ok = false;
+    }
+    if (m_nwin_ok) {
+        nwindowClose(&m_window);
+        m_nwin_ok = false;
+    }
+    if (m_managed_ok) {
+        if (!m_layer_ok) {
+            // viCreateLayer failed: destroy the managed layer by id.
+            std::memset(&m_layer, 0, sizeof(m_layer));
+            m_layer.layer_id = __nx_vi_layer_id;
         }
+        viDestroyManagedLayer(&m_layer);
+        m_managed_ok = false;
     }
-}
-
-void OverlayRenderer::draw_filled_circle(u16* buffer, float cx, float cy, float radius, u16 color) {
-    int r = (int)std::ceil(radius);
-    int min_x = std::max(0, (int)std::floor(cx - r));
-    int max_x = std::min((int)SCREEN_WIDTH - 1, (int)std::ceil(cx + r));
-    int min_y = std::max(0, (int)std::floor(cy - r));
-    int max_y = std::min((int)SCREEN_HEIGHT - 1, (int)std::ceil(cy + r));
-
-    float r_sq = radius * radius;
-    for (int y = min_y; y <= max_y; ++y) {
-        float dy = (float)y - cy;
-        for (int x = min_x; x <= max_x; ++x) {
-            float dx = (float)x - cx;
-            if (dx * dx + dy * dy <= r_sq) {
-                draw_pixel(buffer, x, y, color);
-            }
-        }
+    m_layer_ok = false;
+    std::memset(&m_layer, 0, sizeof(m_layer));
+    __nx_vi_layer_id = 0;
+    if (m_display_ok) {
+        viCloseDisplay(&m_display);
+        m_display_ok = false;
     }
-}
-
-void OverlayRenderer::render_horizon_line(u16* buffer, float cx, float cy, float roll_deg, const VisualConfig& visual, u16 color) {
-    float rad = -roll_deg * DEG_TO_RAD;
-    float cos_r = std::cos(rad);
-    float sin_r = std::sin(rad);
-
-    float half_len = 450.0f;
-    float gap = 45.0f;
-
-    // Left segment
-    float lx0 = cx - cos_r * half_len;
-    float ly0 = cy - sin_r * half_len;
-    float lx1 = cx - cos_r * gap;
-    float ly1 = cy - sin_r * gap;
-    draw_line_thick(buffer, lx0, ly0, lx1, ly1, visual.line_thickness, color);
-
-    // Right segment
-    float rx0 = cx + cos_r * gap;
-    float ry0 = cy + sin_r * gap;
-    float rx1 = cx + cos_r * half_len;
-    float ry1 = cy + sin_r * half_len;
-    draw_line_thick(buffer, rx0, ry0, rx1, ry1, visual.line_thickness, color);
-
-    // End ticks (bank bars)
-    float tick_len = 20.0f;
-    float nx = -sin_r;
-    float ny = cos_r;
-    draw_line_thick(buffer, lx0, ly0, lx0 - nx * tick_len, ly0 - ny * tick_len, visual.line_thickness, color);
-    draw_line_thick(buffer, rx1, ry1, rx1 - nx * tick_len, ry1 - ny * tick_len, visual.line_thickness, color);
-}
-
-void OverlayRenderer::render_pitch_ladder(u16* buffer, float cx, float cy, float pitch_deg, float roll_deg, const VisualConfig& visual, u16 color) {
-    render_horizon_line(buffer, cx, cy, roll_deg, visual, color);
-
-    float rad = -roll_deg * DEG_TO_RAD;
-    float cos_r = std::cos(rad);
-    float sin_r = std::sin(rad);
-    float nx = -sin_r;
-    float ny = cos_r;
-
-    float px_per_deg = 5.0f;
-    float rungs[] = {-20.0f, -10.0f, 10.0f, 20.0f};
-
-    for (float rung_deg : rungs) {
-        float rung_offset_px = (rung_deg - pitch_deg) * px_per_deg;
-        float rcx = cx + nx * rung_offset_px;
-        float rcy = cy + ny * rung_offset_px;
-
-        float half_w = (std::abs(rung_deg) == 10.0f) ? 90.0f : 60.0f;
-        float gap = 20.0f;
-
-        float lx0 = rcx - cos_r * half_w;
-        float ly0 = rcy - sin_r * half_w;
-        float lx1 = rcx - cos_r * gap;
-        float ly1 = rcy - sin_r * gap;
-        draw_line_thick(buffer, lx0, ly0, lx1, ly1, std::max(1, visual.line_thickness - 1), color);
-
-        float rx0 = rcx + cos_r * gap;
-        float ry0 = rcy + sin_r * gap;
-        float rx1 = rcx + cos_r * half_w;
-        float ry1 = rcy + sin_r * half_w;
-        draw_line_thick(buffer, rx0, ry0, rx1, ry1, std::max(1, visual.line_thickness - 1), color);
+    if (m_vi_ok) {
+        viExit();
+        m_vi_ok = false;
     }
-}
-
-void OverlayRenderer::render_minimal_dots(u16* buffer, float cx, float cy, float roll_deg, const VisualConfig& visual, u16 color) {
-    float rad = -roll_deg * DEG_TO_RAD;
-    float cos_r = std::cos(rad);
-    float sin_r = std::sin(rad);
-
-    float dot_distances[] = {-350.0f, -220.0f, -120.0f, -40.0f, 40.0f, 120.0f, 220.0f, 350.0f};
-    float radius = (float)visual.line_thickness * 1.5f + 1.5f;
-
-    for (float d : dot_distances) {
-        float x = cx + cos_r * d;
-        float y = cy + sin_r * d;
-        draw_filled_circle(buffer, x, y, radius, color);
-    }
-}
-
-void OverlayRenderer::render_center_reticle(u16* buffer, float cx, float cy, const VisualConfig& visual, u16 color) {
-    float r = 10.0f;
-    draw_circle(buffer, cx, cy, r, visual.line_thickness, color);
-    draw_filled_circle(buffer, cx, cy, 3.0f, color);
-
-    draw_line_thick(buffer, cx - 22.0f, cy, cx - 12.0f, cy, visual.line_thickness, color);
-    draw_line_thick(buffer, cx + 12.0f, cy, cx + 22.0f, cy, visual.line_thickness, color);
-    draw_line_thick(buffer, cx, cy - 22.0f, cx, cy - 12.0f, visual.line_thickness, color);
-    draw_line_thick(buffer, cx, cy + 12.0f, cx, cy + 22.0f, visual.line_thickness, color);
-}
-
-void OverlayRenderer::render_roll_indicators(u16* buffer, float roll_deg, const VisualConfig& visual, u16 color) {
-    float top_cx = CENTER_X;
-    float top_cy = 70.0f;
-    float arc_radius = 50.0f;
-
-    draw_line_thick(buffer, top_cx - 10.0f, top_cy - 14.0f, top_cx + 10.0f, top_cy - 14.0f, visual.line_thickness, color);
-    draw_line_thick(buffer, top_cx - 10.0f, top_cy - 14.0f, top_cx, top_cy - 2.0f, visual.line_thickness, color);
-    draw_line_thick(buffer, top_cx + 10.0f, top_cy - 14.0f, top_cx, top_cy - 2.0f, visual.line_thickness, color);
-
-    float rad = (-roll_deg - 90.0f) * DEG_TO_RAD;
-    float px = top_cx + std::cos(rad) * arc_radius;
-    float py = top_cy + 40.0f + std::sin(rad) * arc_radius;
-    draw_filled_circle(buffer, px, py, (float)visual.line_thickness * 1.5f + 1.0f, color);
-}
-
-void OverlayRenderer::render_frame(const Orientation& ori, const Config& cfg) {
-    if (!m_initialized) {
-        if (!init()) return;
-    }
-
-    if (!cfg.general.enabled) {
-        clear_transparent();
-        return;
-    }
-
-    u32 stride = 0;
-    u16* buf = (u16*)framebufferBegin(&m_framebuffer, &stride);
-    if (!buf) return;
-
-    // Clear entire frame to full transparency
-    std::memset(buf, 0, (stride > 0 ? stride : (SCREEN_WIDTH * sizeof(u16))) * SCREEN_HEIGHT);
-
-    // Calculate color in RGBA4444 (4-bit per channel: 0x0 to 0xF)
-    u8 alpha4 = (u8)std::round(clamp(cfg.visual.opacity, 0.05f, 1.0f) * 15.0f);
-    if (alpha4 < 1) alpha4 = 1;
-    // Cyan-white HUD color (R: 0xA, G: 0xE, B: 0xF, A: alpha4)
-    u16 hud_color = RGBA4(0xA, 0xE, 0xF, alpha4);
-
-    float px_per_deg = 5.0f;
-    float horizon_cy = CENTER_Y + (ori.pitch_deg * px_per_deg);
-    float horizon_cx = CENTER_X;
-
-    horizon_cy = clamp(horizon_cy, 60.0f, (float)SCREEN_HEIGHT - 60.0f);
-
-    switch (static_cast<OverlayStyle>(cfg.visual.style)) {
-        case OverlayStyle::HorizonLine:
-            render_horizon_line(buf, horizon_cx, horizon_cy, ori.roll_deg, cfg.visual, hud_color);
-            break;
-        case OverlayStyle::PitchLadder:
-            render_pitch_ladder(buf, horizon_cx, horizon_cy, ori.pitch_deg, ori.roll_deg, cfg.visual, hud_color);
-            break;
-        case OverlayStyle::MinimalDots:
-            render_minimal_dots(buf, horizon_cx, horizon_cy, ori.roll_deg, cfg.visual, hud_color);
-            break;
-        case OverlayStyle::FullHUD:
-            render_pitch_ladder(buf, horizon_cx, horizon_cy, ori.pitch_deg, ori.roll_deg, cfg.visual, hud_color);
-            if (cfg.visual.draw_roll_indicators) {
-                render_roll_indicators(buf, ori.roll_deg, cfg.visual, hud_color);
-            }
-            break;
-    }
-
-    if (cfg.visual.draw_center_reticle) {
-        render_center_reticle(buf, CENTER_X, CENTER_Y, cfg.visual, hud_color);
-    }
-
-    if (cfg.visual.draw_roll_indicators && cfg.visual.style != static_cast<int>(OverlayStyle::FullHUD)) {
-        render_roll_indicators(buf, ori.roll_deg, cfg.visual, hud_color);
-    }
-
-    framebufferEnd(&m_framebuffer);
+    m_in_captures = false;
+    m_underscan_z = false;
+    std::memset(m_dirty_count, 0, sizeof(m_dirty_count));
 }
 
 } // namespace kinestop
