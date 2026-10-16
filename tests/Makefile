@@ -19,7 +19,7 @@ BUILD    := build
 CPPFLAGS := -I$(ROOT)/common -I$(ROOT)/overlay/source -MMD -MP
 CXXFLAGS := -std=c++20 -Wall -Wextra -O1 -g
 
-TESTS    := test_swizzle test_dots test_config test_raster test_scale test_hud
+TESTS    := test_swizzle test_dots test_config test_raster test_scale test_hud test_filter
 BINS     := $(addprefix $(BUILD)/,$(TESTS))
 
 COMMON_OBJS := $(BUILD)/config.o $(BUILD)/dots.o
@@ -41,6 +41,12 @@ $(BUILD):
 
 $(BUILD)/%.o: $(ROOT)/common/%.cpp | $(BUILD)
 	$(HOSTCXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/filter.o: $(ROOT)/overlay/source/filter.cpp | $(BUILD)
+	$(HOSTCXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/test_filter: $(BUILD)/test_filter.o $(BUILD)/filter.o $(COMMON_OBJS)
+	$(HOSTCXX) $^ -o $@
 
 $(BUILD)/%.o: %.cpp | $(BUILD)
 	$(HOSTCXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@

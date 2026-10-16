@@ -56,7 +56,7 @@
 * **Free Floating Mode:** Dots can drift naturally beyond screen edges for an authentic horizon view.
 * **Visual Customization:** 12 color themes, 6 placement patterns, dot size, and opacity options.
 * **Adjustable Sensitivity:** 10 sensitivity levels (0.2x - 6.0x) with hand tremor smoothing.
-* **Zero Calibration:** Lock your current holding angle as the center horizon with one click.
+* **Zero Calibration:** Your holding angle becomes the center horizon each time the dots start (**Calibrate on Start**, on by default), or lock it manually with one click.
 * **Console Motion Sensor (optional):** Lets the dots move at the HOME menu and in homebrew such as RetroArch too (off by default). **Console Sensor Boost** (+0 to +9, default +4) raises the Sensitivity by that many steps while the console sensor is moving the dots, because it reacts less than the controllers' sensors.
 * **Show in Screenshots/Videos (optional):** Choose whether the dots appear in screenshots and video captures (off by default).
 * **Language Support:** English and Turkish language support.
@@ -98,7 +98,7 @@ No reboot is needed after installing (unless you are removing an earlier 2.0.0 t
 ### 🎮 Step 3: How to Use
 1. **Open UltraHand:** While in-game, swipe from the left edge or press the Ultrahand key combo (**ZL + ZR + D-Pad Down** by default).
 2. **Launch Kinestop:** Select Kinestop from the overlay list. The settings panel opens with the cursor on **Motion Dots**.
-3. **Configure:** Choose your preferred color, pattern, size, opacity and sensitivity. Changes are saved automatically. The dots are not shown while the panel is open: select **Motion Dots** to see your changes. Hold the console the way you play and use **Calibrate Zero Position** to set the center.
+3. **Configure:** Choose your preferred color, pattern, size, opacity and sensitivity. Changes are saved automatically. The dots are not shown while the panel is open: select **Motion Dots** to see your changes. When the dots start, the way you are holding the console becomes the center (**Calibrate on Start**); turn that off to keep a fixed center set with **Calibrate Zero Position**.
 4. **Play:** Select **Motion Dots** (the first item of the panel). The panel closes at once and the dots are shown over your game.
 5. **Change settings:** Press the Ultrahand key combo (**ZL + ZR + D-Pad Down** by default, or the combo you set in Ultrahand). The dots stop when you press it, and the Kinestop settings panel opens when you let go, with the cursor on **Motion Dots**: select it to go back to the dots. (Swiping from the left edge does not work while the dots are shown.)
 6. **Leave Kinestop:** Press **(B)** in the panel. Kinestop closes (the dots stay off) and you are back in the Ultrahand menu. In **Guide & Info**, **(B)** first goes back to the panel. Pressing the key combo while the panel is open only hides it, as with any overlay.
@@ -163,7 +163,7 @@ make clean
 * **Serbest Hareket Modu:** Noktaların pencereden bakar gibi ekran dışına doğal süzülmesini sağlar.
 * **Görsel Kişiselleştirme:** 12 renk teması, 6 yerleşim şablonu, boyut ve saydamlık seçenekleri.
 * **Hassasiyet Ayarı:** 10 kademeli hassasiyet (0.2x - 6.0x) ve el titremesini filtreleme desteği.
-* **Sıfır Noktası Kalibrasyonu:** Konsolu tuttuğunuz açıyı tek tuşla merkez ufuk seviyesi yapar.
+* **Sıfır Noktası Kalibrasyonu:** Noktalar her başladığında tutuş açınız merkez ufuk seviyesi olur (**Başlarken Kalibre Et**, varsayılan açık) ya da tek tuşla elle sabitleyebilirsiniz.
 * **Konsol Hareket Sensörü (isteğe bağlı):** Noktaların Ana Menüde ve RetroArch gibi homebrew'larda da hareket etmesini sağlar (varsayılan: kapalı). **Konsol Sensörü Takviyesi** (+0 ile +9 arası, varsayılan +4), konsol sensörü kumandalarınkinden daha az tepki verdiği için, noktaları o sürerken Hassasiyet'i bu kadar adım artırır.
 * **Görüntü ve Kayıtlarda Göster (isteğe bağlı):** Noktaların ekran görüntülerinde ve video kayıtlarında görünüp görünmeyeceğini seçin (varsayılan: kapalı).
 * **Dil Desteği:** Türkçe ve İngilizce dil desteği.
@@ -205,7 +205,7 @@ Kurulumdan sonra yeniden başlatmanız gerekmez (önceki bir 2.0.0 deneme sürü
 ### 🎮 3. Aşama: Uygulamanın Kullanımı
 1. **UltraHand'i Açın:** Ekranın sol kenarından sağa kaydırarak veya UltraHand kısayoluyla (varsayılan: **ZL + ZR + D-Pad Aşağı**) UltraHand'i açın.
 2. **Kinestop'u Başlatın:** Listeden Kinestop'u seçin. Ayar paneli, imleç **Hareket Noktaları** üzerindeyken açılır.
-3. **Ayarlayın:** İstediğiniz rengi, yerleşim şablonunu, boyutu, saydamlığı ve hassasiyeti belirleyin. Değişiklikler otomatik kaydedilir. Panel açıkken noktalar görünmez: değişiklikleri görmek için **Hareket Noktaları**'nı seçin. Konsolu oynadığınız gibi tutup **Sıfır Noktasını Kalibre Et** ile merkezi belirleyin.
+3. **Ayarlayın:** İstediğiniz rengi, yerleşim şablonunu, boyutu, saydamlığı ve hassasiyeti belirleyin. Değişiklikler otomatik kaydedilir. Panel açıkken noktalar görünmez: değişiklikleri görmek için **Hareket Noktaları**'nı seçin. Noktalar başlarken konsolu tutuş şekliniz merkez olur (**Başlarken Kalibre Et**); sabit bir merkez için bunu kapatıp **Sıfır Noktasını Kalibre Et**'i kullanın.
 4. **Oyuna Dönün:** **Hareket Noktaları**'nı (panelin ilk seçeneği) seçin. Panel hemen kapanır ve noktalar oyununuzun üzerinde görünür.
 5. **Ayarları Değiştirin:** UltraHand kısayoluna basın (varsayılan: **ZL + ZR + D-Pad Aşağı** ya da UltraHand'de ayarladığınız kısayol). Bastığınızda noktalar durur, tuşları bıraktığınızda Kinestop ayar paneli imleç **Hareket Noktaları** üzerindeyken açılır: noktalara dönmek için onu seçin. (Noktalar ekrandayken sol kenardan kaydırma çalışmaz.)
 6. **Kinestop'tan Çıkın:** Panelde **(B)** tuşuna basın. Kinestop kapanır (noktalar kapalı kalır) ve UltraHand menüsüne dönersiniz. **Yardım ve Rehber** sayfasında **(B)** önce panele döner. Panel açıkken kısayola basmak, her overlay'de olduğu gibi paneli yalnızca gizler.

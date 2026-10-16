@@ -17,7 +17,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE       := Kinestop
 APP_AUTHOR      := Kinestop
-APP_VERSION     := 2.0.0-test.7
+APP_VERSION     := 2.0.0-test.8
 
 TARGET          := kinestop
 BUILD           := build

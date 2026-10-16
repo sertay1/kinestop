@@ -50,6 +50,7 @@ namespace {
     constexpr u64 NoticeNs         = 3000000000ULL;  // transient notice duration
     constexpr u64 SensorRetryNs    = 1000000000ULL;  // retry starting sensors that failed to start
     constexpr u64 SensorFreshNs    =  500000000ULL;  // orientation counts as current this long after a sample
+    constexpr u64 HudCalibrateWaitNs = 500000000ULL; // HUD: longest wait for a sample to calibrate on
 
     // Proper 4-bit RGBA4444 color constructor (0..15 per channel)
     inline constexpr tsl::Color make_color(u8 r, u8 g, u8 b, u8 a = 255) {
@@ -126,6 +127,7 @@ namespace {
     kinestop::Orientation       g_orientation;           // raw filtered orientation (calibration not applied)
     kinestop::SensorSource      g_orientationSource = kinestop::SensorSource::None; // sensor of the latest sample
     u64                         g_lastSampleTick = 0;    // 0 = no sample yet
+    bool                        g_hudReady = false;      // HUD: calibrated (or gave up waiting); dots may show
     u64                         g_nextRetryTick  = 0;
 
     // Returns the SevenSixAxis Result (0 when it runs or was not requested).
@@ -325,13 +327,16 @@ public:
 
     virtual void draw(tsl::gfx::Renderer *renderer) override {
         renderer->clearScreen();
-        // The dots stop as soon as the menu combo is pressed.
-        if (!g_comboReturn.armed)
+        // The dots stop as soon as the menu combo is pressed, and wait for
+        // Calibrate on Start so they don't jump.
+        if (!g_comboReturn.armed && g_hudReady)
             draw_hud_dots(renderer, m_frame);
     }
 };
 
 class GuiKinestopHud : public tsl::Gui {
+    u64 m_startTick = 0;
+
 public:
     virtual tsl::elm::Element* createUI() override {
         return new KinestopHudElement();
@@ -339,6 +344,25 @@ public:
 
     virtual void update() override {
         sensor_tick();
+        if (g_hudReady)
+            return;
+        // Calibrate on Start: the first fresh sample is the new zero, as the
+        // menu's Calibrate Zero Position does. Without motion data (HOME
+        // menu or homebrew with the console sensor off) the dots show with
+        // the saved zero after HudCalibrateWaitNs.
+        const u64 now = armGetSystemTick();
+        if (m_startTick == 0)
+            m_startTick = now;
+        if (!g_config.calibration.auto_calibrate) {
+            g_hudReady = true;
+        } else if (sensor_fresh()) {
+            g_config.calibration.pitch_offset = g_orientation.pitch_deg;
+            g_config.calibration.roll_offset  = g_orientation.roll_deg;
+            save_config_now();
+            g_hudReady = true;
+        } else if (armTicksToNs(now - m_startTick) >= HudCalibrateWaitNs) {
+            g_hudReady = true;
+        }
     }
 
     virtual bool handleInput(u64 keysDown, u64 keysHeld, const HidTouchState &touchPos, HidAnalogStickState joyStickPosLeft, HidAnalogStickState joyStickPosRight) override {
@@ -550,6 +574,12 @@ public:
             add_sub("Dikey / Yatay Yönü Ters Çevir:", make_color(255, 90, 100));
             add_body("Noktaların kayma yönünü tersine çevirir.");
 
+            add_sub("Başlarken Kalibre Et:", make_color(80, 240, 120));
+            add_body("Hareket Noktaları her başladığında");
+            add_body("tutuş açınız sıfır noktası olur");
+            add_body("(varsayılan açık). Sabit bir sıfır için");
+            add_body("kapatın.");
+
             add_sub("Sıfır Noktasını Kalibre Et:", make_color(80, 240, 120));
             add_body("Konsolu o an tuttuğunuz açıyı (yatakta veya");
             add_body("araçta) yeni merkez sıfır açısı yapar.");
@@ -668,6 +698,11 @@ public:
 
             add_sub("Invert Pitch / Roll:", make_color(255, 90, 100));
             add_body("Inverts vertical or horizontal dot motion.");
+
+            add_sub("Calibrate on Start:", make_color(80, 240, 120));
+            add_body("Each time Motion Dots starts, your");
+            add_body("holding angle becomes the zero (on by");
+            add_body("default). Turn off to keep a fixed zero.");
 
             add_sub("Calibrate Zero Position:", make_color(80, 240, 120));
             add_body("Locks your current handheld holding angle");
@@ -1013,6 +1048,24 @@ public:
             apply_setting();
         });
         list->addItem(toggleInvertRoll);
+
+        auto *toggleAutoCalib = new tsl::elm::ToggleListItem(isTr ? "Başlarken Kalibre Et" : "Calibrate on Start",
+                                                             g_config.calibration.auto_calibrate);
+        toggleAutoCalib->setStateChangedListener([](bool newState) {
+            g_config.calibration.auto_calibrate = newState;
+            save_config_now();
+        });
+        list->addItem(toggleAutoCalib);
+
+        static constexpr const char* autoCalibEn[] = {
+            "Motion Dots uses your holding angle",
+            "at start as the zero.",
+        };
+        static constexpr const char* autoCalibTr[] = {
+            "Hareket Noktaları başlarken tutuş",
+            "açınızı sıfır noktası yapar.",
+        };
+        add_note(list, isTr ? autoCalibTr : autoCalibEn, 2);
 
         // Calibration Handheld Zero Button: the current filtered orientation,
         // sampled by this panel, becomes the zero.

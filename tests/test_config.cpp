@@ -47,6 +47,7 @@ bool same(const Config& a, const Config& b, double tol) {
            f(a.calibration.roll_offset, b.calibration.roll_offset) &&
            a.calibration.invert_pitch == b.calibration.invert_pitch &&
            a.calibration.invert_roll == b.calibration.invert_roll &&
+           a.calibration.auto_calibrate == b.calibration.auto_calibrate &&
            f(a.calibration.sensitivity_pitch, b.calibration.sensitivity_pitch) &&
            f(a.calibration.sensitivity_roll, b.calibration.sensitivity_roll) &&
            a.calibration.console_sensitivity_offset == b.calibration.console_sensitivity_offset;
@@ -70,6 +71,7 @@ Config non_default() {
     c.calibration.roll_offset = 3.1415927f;
     c.calibration.invert_pitch = true;
     c.calibration.invert_roll = true;
+    c.calibration.auto_calibrate = false;
     c.calibration.sensitivity_pitch = 2.0f;
     c.calibration.sensitivity_roll = 4.0f;
     c.calibration.console_sensitivity_offset = 7;
@@ -298,10 +300,16 @@ void test_console_sensitivity_offset() {
     CHECK(c.load(path.c_str()));
     CHECK_EQ(c.calibration.console_sensitivity_offset, 0);
 
-    write_file(path, "[calibration]\nsensitivity_roll = 2\n");  // older file without the key
+    write_file(path, "[calibration]\nsensitivity_roll = 2\n");  // older file without the keys
     Config e;
     CHECK(e.load(path.c_str()));
     CHECK_EQ(e.calibration.console_sensitivity_offset, 4);
+    CHECK_EQ(e.calibration.auto_calibrate, true);
+
+    write_file(path, "[calibration]\nauto_calibrate = off\n");
+    Config g;
+    CHECK(g.load(path.c_str()));
+    CHECK_EQ(g.calibration.auto_calibrate, false);
 }
 
 // debug_flags from the 2.0.0 sysmodule test builds and the original's
