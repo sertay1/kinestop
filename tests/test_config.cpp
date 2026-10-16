@@ -48,7 +48,8 @@ bool same(const Config& a, const Config& b, double tol) {
            a.calibration.invert_pitch == b.calibration.invert_pitch &&
            a.calibration.invert_roll == b.calibration.invert_roll &&
            f(a.calibration.sensitivity_pitch, b.calibration.sensitivity_pitch) &&
-           f(a.calibration.sensitivity_roll, b.calibration.sensitivity_roll);
+           f(a.calibration.sensitivity_roll, b.calibration.sensitivity_roll) &&
+           a.calibration.console_sensitivity_offset == b.calibration.console_sensitivity_offset;
 }
 
 Config non_default() {
@@ -71,6 +72,7 @@ Config non_default() {
     c.calibration.invert_roll = true;
     c.calibration.sensitivity_pitch = 2.0f;
     c.calibration.sensitivity_roll = 4.0f;
+    c.calibration.console_sensitivity_offset = 7;
     return c;
 }
 
@@ -276,6 +278,32 @@ void test_console_sensor() {
     CHECK_EQ(c.general.console_sensor, false);
 }
 
+void test_console_sensitivity_offset() {
+    Config d;
+    CHECK_EQ(d.calibration.console_sensitivity_offset, 4);
+
+    const std::string path = g_tmp + "/boost.ini";
+    write_file(path, "[calibration]\nconsole_sensitivity_offset = 2\n");
+    Config a;
+    CHECK(a.load(path.c_str()));
+    CHECK_EQ(a.calibration.console_sensitivity_offset, 2);
+
+    write_file(path, "[calibration]\nconsole_sensitivity_offset = 42\n");
+    Config b;
+    CHECK(b.load(path.c_str()));
+    CHECK_EQ(b.calibration.console_sensitivity_offset, 9);   // clamped
+
+    write_file(path, "[calibration]\nconsole_sensitivity_offset = -3\n");
+    Config c;
+    CHECK(c.load(path.c_str()));
+    CHECK_EQ(c.calibration.console_sensitivity_offset, 0);
+
+    write_file(path, "[calibration]\nsensitivity_roll = 2\n");  // older file without the key
+    Config e;
+    CHECK(e.load(path.c_str()));
+    CHECK_EQ(e.calibration.console_sensitivity_offset, 4);
+}
+
 // debug_flags from the 2.0.0 sysmodule test builds and the original's
 // general.enabled (replaced by the menu's launch item) are ignored on load
 // and not written back.
@@ -414,6 +442,7 @@ int main() {
     test_legacy_file();
     test_parser_robustness();
     test_console_sensor();
+    test_console_sensitivity_offset();
     test_legacy_debug_flags();
     test_sanitize();
 

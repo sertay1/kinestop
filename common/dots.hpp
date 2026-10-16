@@ -48,6 +48,10 @@ size_t get_anchors(int style, int density, Point* out, size_t max);
 // sensitivity and the free-floating range. Logical px.
 Point compute_offset(const Orientation& raw, const Config& cfg);
 
+// `sensitivity` moved `steps` places along SENSITIVITIES (from the nearest
+// table entry), clamped to the table: the console-sensor boost.
+float offset_sensitivity(float sensitivity, int steps);
+
 // Dot core radius in logical px for the configured size index.
 float dot_radius(const Config& cfg);
 

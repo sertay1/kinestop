@@ -386,6 +386,17 @@ void test_dot_radius() {
     }
 }
 
+void test_offset_sensitivity() {
+    // Default boost: 1.0x + 4 steps = 4.0x (0.2 0.5 0.8 1.0 1.5 2.0 3.0 4.0 5.0 6.0).
+    CHECK_EQ(dots::offset_sensitivity(1.0f, 4), 4.0f);
+    CHECK_EQ(dots::offset_sensitivity(1.0f, 0), 1.0f);
+    CHECK_EQ(dots::offset_sensitivity(0.2f, 1), 0.5f);
+    CHECK_EQ(dots::offset_sensitivity(5.0f, 4), 6.0f);   // clamped at the top
+    CHECK_EQ(dots::offset_sensitivity(6.0f, 9), 6.0f);
+    CHECK_EQ(dots::offset_sensitivity(1.02f, 1), 1.5f);  // off-table value snaps to the nearest entry
+    CHECK_EQ(dots::offset_sensitivity(1.0f, -9), 0.2f);  // clamped at the bottom
+}
+
 } // namespace
 
 int main() {
@@ -395,5 +406,6 @@ int main() {
     test_anchor_truncation();
     test_compute_offset();
     test_dot_radius();
+    test_offset_sensitivity();
     return check::summary("dots");
 }

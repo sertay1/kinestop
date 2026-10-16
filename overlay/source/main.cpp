@@ -124,6 +124,7 @@ namespace {
     bool                        g_hidDown      = false;  // libtesla is restarting HID
     kinestop::ComplementaryFilter g_filter;
     kinestop::Orientation       g_orientation;           // raw filtered orientation (calibration not applied)
+    kinestop::SensorSource      g_orientationSource = kinestop::SensorSource::None; // sensor of the latest sample
     u64                         g_lastSampleTick = 0;    // 0 = no sample yet
     u64                         g_nextRetryTick  = 0;
 
@@ -169,6 +170,7 @@ namespace {
         // frames without one (clamped inside update()).
         const float dt = g_lastSampleTick != 0 ? (float)armTicksToNs(now - g_lastSampleTick) / 1e9f : 0.0f;
         g_orientation = g_filter.update(smp.accel, smp.gyro, dt, g_config);
+        g_orientationSource = smp.source;
         g_lastSampleTick = now;
     }
 
@@ -282,6 +284,19 @@ namespace {
             tsl::cfg::FramebufferWidth, tsl::cfg::FramebufferHeight};
         if (surface.pixels == nullptr)
             return;
+        // The console sensor reacts much less than the controllers' at the
+        // same setting: while it drives the dots, sensitivity moves up by
+        // the Console Sensor Boost steps.
+        if (g_orientationSource == kinestop::SensorSource::SevenSixAxis &&
+            g_config.calibration.console_sensitivity_offset != 0) {
+            kinestop::Config boosted = g_config;
+            const int steps = g_config.calibration.console_sensitivity_offset;
+            boosted.calibration.sensitivity_roll  = dots::offset_sensitivity(g_config.calibration.sensitivity_roll, steps);
+            boosted.calibration.sensitivity_pitch = dots::offset_sensitivity(g_config.calibration.sensitivity_pitch, steps);
+            kinestop::hud::draw_dots(surface, frame, dots::compute_offset(g_orientation, boosted),
+                                     g_config.visual.free_floating);
+            return;
+        }
         kinestop::hud::draw_dots(surface, frame, dots::compute_offset(g_orientation, g_config),
                                  g_config.visual.free_floating);
     }
@@ -482,9 +497,15 @@ public:
             add_sub("Konsol Hareket Sensörü:", make_color(255, 210, 60));
             add_body("Konsolun kendi hareket sensörünü de");
             add_body("okur; böylece noktalar HOME menüsünde");
-            add_body("de hareket eder (orada kumanda hareket");
+            add_body("ve RetroArch gibi homebrew'larda da");
+            add_body("hareket eder (orada kumanda hareket");
             add_body("verisi durur). 512 KB overlay belleği");
             add_body("kullanır; varsayılan olarak kapalıdır.");
+
+            add_sub("Konsol Sensörü Takviyesi (+0 - +9):", make_color(255, 170, 50));
+            add_body("Konsol sensörü daha az tepki verir;");
+            add_body("noktaları o sürerken Hassasiyet bu");
+            add_body("kadar adım artırılır (varsayılan +4).");
 
             add_sub("Desen (Yerleşim):", make_color(255, 210, 60));
             add_body("Noktaların ekrandaki yerleşim şablonu:");
@@ -532,8 +553,8 @@ public:
             add_sub("Sıfır Noktasını Kalibre Et:", make_color(80, 240, 120));
             add_body("Konsolu o an tuttuğunuz açıyı (yatakta veya");
             add_body("araçta) yeni merkez sıfır açısı yapar.");
-            add_body("HOME menüsünde Konsol Hareket Sensörü");
-            add_body("açık olmalıdır.");
+            add_body("HOME menüsünde ve homebrew'larda Konsol");
+            add_body("Hareket Sensörü açık olmalıdır.");
 
             add_sub("Sıfır Noktasını Sıfırla:", make_color(80, 240, 120));
             add_body("Düz ufuk seviyesine geri döndürür.");
@@ -596,9 +617,15 @@ public:
             add_sub("Console Motion Sensor:", make_color(255, 210, 60));
             add_body("Also reads the console's own motion");
             add_body("sensor, so the dots move at the HOME");
-            add_body("menu too (controller motion data stops");
+            add_body("menu and in homebrew like RetroArch");
+            add_body("too (controller motion data stops");
             add_body("there). Uses 512 KB of overlay memory;");
             add_body("off by default.");
+
+            add_sub("Console Sensor Boost (+0 - +9):", make_color(255, 170, 50));
+            add_body("The console sensor reacts less, so");
+            add_body("while it moves the dots, Sensitivity");
+            add_body("goes up this many steps (default +4).");
 
             add_sub("Pattern (Placement):", make_color(255, 210, 60));
             add_body("Choose where dots appear on screen:");
@@ -645,8 +672,8 @@ public:
             add_sub("Calibrate Zero Position:", make_color(80, 240, 120));
             add_body("Locks your current handheld holding angle");
             add_body("(e.g. reclining in bed/car) as center zero.");
-            add_body("At the HOME menu this needs the Console");
-            add_body("Motion Sensor.");
+            add_body("At the HOME menu and in homebrew this");
+            add_body("needs the Console Motion Sensor.");
 
             add_sub("Reset Zero to Flat Horizon:", make_color(80, 240, 120));
             add_body("Restores flat level horizon zero reference.");
@@ -798,14 +825,36 @@ public:
         list->addItem(toggleConsoleSensor);
 
         static constexpr const char* sensorEn[] = {
-            "Lets dots move at the HOME menu",
-            "(uses 512 KB).",
+            "Lets dots move at the HOME menu and",
+            "in homebrew like RetroArch (512 KB).",
         };
         static constexpr const char* sensorTr[] = {
-            "Noktalar HOME menüsünde de hareket",
-            "eder (512 KB kullanır).",
+            "Noktalar HOME menüsünde ve RetroArch",
+            "gibi homebrew'larda da hareket eder",
+            "(512 KB kullanır).",
         };
-        add_note(list, isTr ? sensorTr : sensorEn, 2);
+        if (isTr) add_note(list, sensorTr, 3);
+        else      add_note(list, sensorEn, 2);
+
+        auto *boostTrackBar = new tsl::elm::NamedStepTrackBar("", {
+            "+0", "+1", "+2", "+3", "+4", "+5", "+6", "+7", "+8", "+9"
+        }, true, isTr ? "Konsol Sensörü Takviyesi" : "Console Sensor Boost");
+        boostTrackBar->setProgress((u8)std::clamp(g_config.calibration.console_sensitivity_offset, 0, 9));
+        boostTrackBar->setValueChangedListener([](u8 index) {
+            g_config.calibration.console_sensitivity_offset = std::clamp((int)index, 0, 9);
+            apply_setting();
+        });
+        list->addItem(boostTrackBar);
+
+        static constexpr const char* boostEn[] = {
+            "Extra Sensitivity steps while the",
+            "console sensor moves the dots.",
+        };
+        static constexpr const char* boostTr[] = {
+            "Konsol sensörü noktaları hareket",
+            "ettirirken eklenen Hassasiyet adımı.",
+        };
+        add_note(list, isTr ? boostTr : boostEn, 2);
 
         // ------------------ PATTERN & DENSITY ------------------
         list->addItem(new tsl::elm::CategoryHeader(isTr ? "Yerleşim ve Yoğunluk" : "Placement & Density"));
