@@ -155,7 +155,7 @@ Result Renderer::update_z() {
     return rc;
 }
 
-Result Renderer::init(bool show_in_captures, LayerMode mode, KinestopStage& stage) {
+Result Renderer::init(bool show_in_captures, LayerMode mode, bool low_z, KinestopStage& stage) {
     if (m_fb_ok) return 0;
     teardown();  // clean slate if a previous attempt got partway
     m_soft_rc = 0;
@@ -201,6 +201,9 @@ Result Renderer::init(bool show_in_captures, LayerMode mode, KinestopStage& stag
             m_normal_z = 254;  // libtesla falls back to 255 for itself
             m_info.z_max = -1;
         }
+        // Test build: same Z band libtesla moves itself to under underscan,
+        // far below Tesla's own Z (max).
+        if (low_z) m_normal_z = UNDERSCAN_Z;
         m_underscan_z = underscan_active();
         m_info.z = m_underscan_z ? UNDERSCAN_Z : m_normal_z;
         m_info.underscan = m_underscan_z;
@@ -248,6 +251,7 @@ Result Renderer::init(bool show_in_captures, LayerMode mode, KinestopStage& stag
     std::memset(m_dirty_count, 0, sizeof(m_dirty_count));
 
     m_mode = mode;
+    m_low_z = low_z;
     m_info.fb_width = m_fb_width;
     m_info.fb_height = m_fb_height;
     m_info.in_captures = show_in_captures;
@@ -491,6 +495,7 @@ void Renderer::teardown() {
     }
     m_in_captures = false;
     m_mode = LayerMode::Full2x;
+    m_low_z = false;
     m_underscan_z = false;
     std::memset(m_dirty_count, 0, sizeof(m_dirty_count));
 }

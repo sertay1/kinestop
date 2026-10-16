@@ -26,7 +26,7 @@ EXEFS_SRC := exefs_src
 # Only these are taken from ../common (the overlay owns everything else there).
 COMMON_CPPFILES := config.cpp dots.cpp
 
-APP_VERSION := 2.0.0-test.3
+APP_VERSION := 2.0.0-test.4
 
 #---------------------------------------------------------------------------------
 # options for code generation

@@ -300,20 +300,20 @@ void test_debug_flags_parse() {
 
     // Every defined bit survives sanitize(); anything above KINESTOP_DEBUG_ALL
     // is dropped.
-    write_file(path, "[general]\ndebug_flags = 31\n");
+    write_file(path, "[general]\ndebug_flags = 63\n");
     Config h;
     CHECK(h.load(path.c_str()));
     CHECK_EQ(h.general.debug_flags, (int)KINESTOP_DEBUG_ALL);
     CHECK_EQ(h.general.debug_flags, (int)(KINESTOP_DEBUG_BLINK_TEST | KINESTOP_DEBUG_UNSCALED_LAYER |
                                           KINESTOP_DEBUG_VERBOSE_LOG | KINESTOP_DEBUG_NO_SUSPEND |
-                                          KINESTOP_DEBUG_SCALED_SMALL));
+                                          KINESTOP_DEBUG_SCALED_SMALL | KINESTOP_DEBUG_LOW_Z));
 
     write_file(path, "[general]\ndebug_flags = 255\n");
     Config i;
     CHECK(i.load(path.c_str()));
     CHECK_EQ(i.general.debug_flags, (int)KINESTOP_DEBUG_ALL);
 
-    write_file(path, "[general]\ndebug_flags = 48\n");  // 0x20 | SCALED_SMALL
+    write_file(path, "[general]\ndebug_flags = 80\n");  // 0x40 (unknown) | SCALED_SMALL
     Config j;
     CHECK(j.load(path.c_str()));
     CHECK_EQ(j.general.debug_flags, (int)KINESTOP_DEBUG_SCALED_SMALL);
@@ -378,7 +378,7 @@ void test_wire() {
     dbg.to_wire(w3);
     CHECK_EQ(w3.debug_flags, (int)KINESTOP_DEBUG_ALL);
     CHECK_EQ(dbg.general.debug_flags, 0xFF);  // source untouched
-    w3.debug_flags = 0xE2;  // 0b11100010: only UNSCALED_LAYER is known
+    w3.debug_flags = 0xC2;  // 0b11000010: only UNSCALED_LAYER is known
     Config dbg2;
     dbg2.from_wire(w3);
     CHECK_EQ(dbg2.general.debug_flags, (int)KINESTOP_DEBUG_UNSCALED_LAYER);
@@ -510,7 +510,7 @@ void test_sanitize() {
     // load() sanitizes what it reads.
     const std::string path = g_tmp + "/out_of_range.ini";
     write_file(path,
-               "[general]\npoll_rate_hz = 5000\nlanguage = 3\ndebug_flags = 44\n"
+               "[general]\npoll_rate_hz = 5000\nlanguage = 3\ndebug_flags = 108\n"
                "[visual]\nstyle = 42\ncolor = -3\nopacity = 9\nline_thickness = 99999999999\n"
                "[filter]\nalpha = nan\ndeadzone_deg = 50\n"
                "[calibration]\nsensitivity_roll = 0\n");
@@ -518,7 +518,7 @@ void test_sanitize() {
     CHECK(l.load(path.c_str()));
     CHECK_EQ(l.general.poll_rate_hz, 120);
     CHECK_EQ(l.general.language, 1);
-    CHECK_EQ(l.general.debug_flags, 12);  // 44 = 0b101100: bit 5 dropped
+    CHECK_EQ(l.general.debug_flags, 44);  // 108 = 0b1101100: bit 6 dropped
     CHECK_EQ(l.visual.style, 0);
     CHECK_EQ(l.visual.color, 0);
     CHECK_EQ(l.visual.opacity, 1.0f);

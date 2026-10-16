@@ -1348,6 +1348,17 @@ public:
                 { "sysmodule.log'a saniyede 1 satır yazar;",
                   "her SD yazımı küçük takılma yapabilir.", nullptr },
             } },
+            { "Low Z test layer (use with the test below)", "Düşük Z test katmanı (alttaki testle kullanın)",
+              KINESTOP_DEBUG_LOW_Z, {}, {
+                { "Puts the dots at Z 33, far below Tesla",
+                  "menus. Turn on, then turn on 'Keep dots",
+                  "while menus open' and check whether this",
+                  "panel and the dots both stay visible.", nullptr },
+                { "Noktaları Z 33'e, Tesla menülerinin çok",
+                  "altına koyar. Açın, sonra 'Menüler",
+                  "açıkken noktaları göster'i açıp bu panel",
+                  "ve noktalar birlikte görünüyor mu, bakın.", nullptr },
+            } },
             { "Keep dots while menus open (coexistence test)",
               "Menüler açıkken noktaları göster (uyumluluk testi)", KINESTOP_DEBUG_NO_SUSPEND, {}, {
                 { "Dots stay on while this panel and the",

@@ -89,7 +89,7 @@ public:
 
     // Creates the layer and framebuffer. On failure everything created so far
     // is torn down again and `stage` names the step that failed.
-    Result init(bool show_in_captures, LayerMode mode, KinestopStage& stage);
+    Result init(bool show_in_captures, LayerMode mode, bool low_z, KinestopStage& stage);
 
     // Presents one transparent frame (bounded), then destroys everything:
     // layer, display, vi session and the framebuffers (heap memory).
@@ -98,6 +98,7 @@ public:
     bool ready() const { return m_fb_ok; }
     bool in_captures() const { return m_in_captures; }
     LayerMode mode() const { return m_mode; }
+    bool low_z() const { return m_low_z; }
     // Framebuffer size of the current layer (valid while ready()).
     u32 fb_width() const { return m_fb_width; }
     u32 fb_height() const { return m_fb_height; }
@@ -133,6 +134,7 @@ private:
     u32 m_fb_width, m_fb_height;
     bool m_underscan_z;
     s32 m_normal_z;
+    bool m_low_z = false;  // KINESTOP_DEBUG_LOW_Z: normal Z is UNDERSCAN_Z
     Result m_soft_rc;
     LayerInfo m_info;
     PresentStats m_stats;

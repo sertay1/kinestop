@@ -57,7 +57,10 @@ typedef enum {
 #define KINESTOP_DEBUG_NO_SUSPEND     (1u << 3)  /* overlay never suspends the dots (layer coexistence test) */
 #define KINESTOP_DEBUG_SCALED_SMALL   (1u << 4)  /* 2x-scaled quarter test layer: 320x180 fb in a 960x540 (VI units) layer.
                                                   * If both UNSCALED_LAYER and SCALED_SMALL are set, UNSCALED_LAYER wins. */
-#define KINESTOP_DEBUG_ALL            0x1Fu
+#define KINESTOP_DEBUG_LOW_Z         (1u << 5)  /* put the dots layer at Z 33 (the band libtesla uses under
+                                                  * underscan) instead of max-1: tests whether the
+                                                  * high-Z band, not the layer count, hides Tesla */
+#define KINESTOP_DEBUG_ALL            0x3Fu
 
 /* Mirror of kinestop::Config that the renderer needs. Index fields use the
  * same meaning as config.ini (see common/config.hpp). */

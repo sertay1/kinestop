@@ -34,7 +34,7 @@
 #include "sensor.hpp"
 
 #ifndef APP_VERSION
-#define APP_VERSION "2.0.0-test.3"
+#define APP_VERSION "2.0.0-test.4"
 #endif
 
 // ---------------------------------------------------------------------------
@@ -436,13 +436,14 @@ int main(int argc, char* argv[]) {
     if (!config.load())
         kinestop::log::write("config.ini not found, using defaults");
     if (config.general.debug_flags)
-        kinestop::log::write("debug_flags %d (blink %d, unscaled %d, verbose %d, no_suspend %d, scaled_small %d)",
+        kinestop::log::write("debug_flags %d (blink %d, unscaled %d, verbose %d, no_suspend %d, scaled_small %d, low_z %d)",
                              config.general.debug_flags,
                              (config.general.debug_flags & KINESTOP_DEBUG_BLINK_TEST) ? 1 : 0,
                              (config.general.debug_flags & KINESTOP_DEBUG_UNSCALED_LAYER) ? 1 : 0,
                              (config.general.debug_flags & KINESTOP_DEBUG_VERBOSE_LOG) ? 1 : 0,
                              (config.general.debug_flags & KINESTOP_DEBUG_NO_SUSPEND) ? 1 : 0,
-                             (config.general.debug_flags & KINESTOP_DEBUG_SCALED_SMALL) ? 1 : 0);
+                             (config.general.debug_flags & KINESTOP_DEBUG_SCALED_SMALL) ? 1 : 0,
+                             (config.general.debug_flags & KINESTOP_DEBUG_LOW_Z) ? 1 : 0);
 
     // general.enabled is not checked: it is the overlay's master-toggle
     // state. Being launched at all (overlay, boot2.flag, or a sysmodule
@@ -658,17 +659,19 @@ int main(int argc, char* argv[]) {
             (dbg & KINESTOP_DEBUG_UNSCALED_LAYER) ? kinestop::LayerMode::Quarter1x
             : (dbg & KINESTOP_DEBUG_SCALED_SMALL) ? kinestop::LayerMode::Quarter2x
                                                   : kinestop::LayerMode::Full2x;
+        const bool want_low_z = (dbg & KINESTOP_DEBUG_LOW_Z) != 0;
         if (renderer.ready() && (renderer.in_captures() != local.visual.show_in_captures ||
-                                 renderer.mode() != want_mode)) {
-            kinestop::log::write("show_in_captures %d / mode %s changed, re-creating layer",
-                                 local.visual.show_in_captures ? 1 : 0, kinestop::layer_mode_name(want_mode));
+                                 renderer.mode() != want_mode || renderer.low_z() != want_low_z)) {
+            kinestop::log::write("show_in_captures %d / mode %s / low_z %d changed, re-creating layer",
+                                 local.visual.show_in_captures ? 1 : 0, kinestop::layer_mode_name(want_mode),
+                                 want_low_z ? 1 : 0);
             layer_down(frame_start, "settings");
             next_vi_retry = 0;
         }
 
         if (want_layer && !renderer.ready() && frame_start >= next_vi_retry) {
             KinestopStage stage = KinestopStage_None;
-            rc = renderer.init(local.visual.show_in_captures, want_mode, stage);
+            rc = renderer.init(local.visual.show_in_captures, want_mode, want_low_z, stage);
             z_failed = false;  // a new layer gets its Z from init()
             if (R_FAILED(rc)) {
                 record_error(stage, rc);
