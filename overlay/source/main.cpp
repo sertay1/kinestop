@@ -87,13 +87,19 @@ namespace {
         tsl::Overlay::get()->close(true);
     }
 
-    // B in the settings: closes Kinestop into the Ultrahand menu, as Status
-    // Monitor's menu does after a combo return. A plain close only shows
-    // ovlmenu when Ultrahand's in_overlay flag is still set, and a --direct
-    // launch (a launch-mode combo, libtesla's combo return to our own menu)
-    // clears it, so it is set here and ovlmenu is launched directly, with its
+    // B in the settings: closes Kinestop into the Ultrahand menu. A plain
+    // close, exactly like any overlay launched from the Ultrahand list, works
+    // while Ultrahand's in_overlay flag is set (our own menu <-> HUD
+    // relaunches keep it). Only a --direct launch (a launch-mode combo,
+    // libtesla's combo return to our own menu) clears it; then, as Status
+    // Monitor does, it is set again and ovlmenu is launched directly with its
     // cursor on our row; ovlmenu plays the exit feedback.
     void return_to_ultrahand_menu() {
+        if (ult::parseValueFromIniSection(ult::ULTRAHAND_CONFIG_INI_PATH, ult::ULTRAHAND_PROJECT_NAME,
+                                          ult::IN_OVERLAY_STR) != ult::FALSE_STR) {
+            tsl::Overlay::get()->close();
+            return;
+        }
         ult::setIniFileValue(ult::ULTRAHAND_CONFIG_INI_PATH, ult::ULTRAHAND_PROJECT_NAME, ult::IN_OVERLAY_STR, ult::TRUE_STR);
         tsl::setNextOverlay(returnOverlayPath, "--direct --comboReturnFrom " + g_selfName);
         skipClosingExitFeedback = true;
