@@ -33,9 +33,9 @@
 > **Bu, [SertAy'ın Kinestop](https://github.com/sertay1/Kinestop) projesinin değiştirilmiş bir sürümüdür.** Orijinal fikir, tasarım, hareket algoritması, renk temaları ve rehberin tüm hakları **SertAy**'a aittir. Bu sürümde noktaların çizimi overlay'den alınıp arka planda çalışan küçük bir sistem modülüne (sysmodule) taşınmıştır. Değişiklikler [LICENSE](LICENSE) dosyasının 2. maddesi gereği yukarıda listelenmiştir.
 
 > [!WARNING]
-> **Status:** version 2.0.0 (the sysmodule split) is a **test build and does not work correctly yet**. The first console test (HOS 19.0.1, handheld) showed two problems: the dots appeared but did not move, and while they were on, overlay menus (the Kinestop panel and the Ultrahand menu) were not drawn. 2.0.0-test.2 is a diagnostic build for tracking these down: it pauses the dots while the Kinestop panel is open, shows live diagnostics in the panel and writes them to `SD:/config/kinestop/sysmodule.log`. **To test:** open the Kinestop panel from the Ultrahand menu, turn the dots on, then *hide* the panel with the Ultrahand launch combo; the dots come back. Pressing the combo again shows the panel (dots paused). Leaving the panel with **B** (back to the Ultrahand menu) keeps the dots paused so that the menu stays visible; they resume the next time you hide the panel with the combo. If the Ultrahand menu does not appear while the dots are on, that is the known problem being diagnosed. The [original release](https://github.com/sertay1/Kinestop/releases) is the stable, overlay-only version.
+> **Status:** version 2.0.0 (the sysmodule split) is a **test build and does not work correctly yet**. The first console test (HOS 19.0.1, handheld) showed two problems: the dots appeared but did not move, and while they were on, overlay menus (the Kinestop panel and the Ultrahand menu) were not drawn. 2.0.0-test.2 showed that the dots do move, and that the menus stay visible as long as the dots are paused while a menu is open, which is what this build does by default. **2.0.0-test.3** reads the motion sensor at its full rate (the dots moved in steps in test.2), writes its log in the background, and adds a test that keeps the dots on while menus are open, to find out whether both can be shown at the same time. See **Test build (2.0.0-test.3)** below for what to try. **Normal use:** open the Kinestop panel from the Ultrahand menu, turn the dots on, then *hide* the panel with the Ultrahand launch combo; the dots come back. Pressing the combo again shows the panel (dots paused). Leaving the panel with **B** (back to the Ultrahand menu) keeps the dots paused so that the menu stays visible; to bring them back, open Kinestop again and hide it with the combo. Live diagnostics are shown in the panel and written to `SD:/config/kinestop/sysmodule.log`. The [original release](https://github.com/sertay1/Kinestop/releases) is the stable, overlay-only version.
 >
-> **Durum:** 2.0.0 sürümü (sysmodule ayrımı) bir **deneme sürümüdür ve henüz doğru çalışmıyor.** İlk konsol testinde (HOS 19.0.1, el modu) iki sorun görüldü: noktalar göründü ama hareket etmedi, ve noktalar açıkken overlay menüleri (Kinestop paneli ve Ultrahand menüsü) çizilmedi. 2.0.0-test.2 bu sorunları bulmak için hazırlanmış bir tanılama sürümüdür: Kinestop paneli açıkken noktaları duraklatır, panelde canlı tanılama bilgisi gösterir ve bunu `SD:/config/kinestop/sysmodule.log` dosyasına yazar. **Test için:** Ultrahand menüsünden Kinestop panelini açın, noktaları açın ve paneli Ultrahand açma kombinasyonuyla *gizleyin*; noktalar geri gelir. Kombinasyona tekrar basınca panel görünür (noktalar duraklatılır). Panelden **B** ile çıkarsanız (Ultrahand menüsüne dönüş) noktalar duraklatılmış kalır, böylece menü görünür kalır; paneli bir sonraki sefer kombinasyonla gizlediğinizde devam ederler. Noktalar açıkken Ultrahand menüsü görünmüyorsa, bu incelenen bilinen sorundur. Kararlı, yalnızca overlay'den oluşan sürüm için [orijinal sürüme](https://github.com/sertay1/Kinestop/releases) bakın.
+> **Durum:** 2.0.0 sürümü (sysmodule ayrımı) bir **deneme sürümüdür ve henüz doğru çalışmıyor.** İlk konsol testinde (HOS 19.0.1, el modu) iki sorun görüldü: noktalar göründü ama hareket etmedi, ve noktalar açıkken overlay menüleri (Kinestop paneli ve Ultrahand menüsü) çizilmedi. 2.0.0-test.2, noktaların hareket ettiğini ve bir menü açıkken noktalar duraklatıldığı sürece menülerin görünür kaldığını gösterdi; bu sürüm de varsayılan olarak böyle çalışır. **2.0.0-test.3** hareket sensörünü tam hızında okur (test.2'de noktalar kesik kesik hareket ediyordu), günlüğü arka planda yazar ve noktaların menülerle aynı anda gösterilip gösterilemeyeceğini anlamak için menüler açıkken noktaları açık tutan bir test ekler. Ne denenmesi gerektiği aşağıdaki **Deneme sürümü (2.0.0-test.3)** bölümündedir. **Normal kullanım:** Ultrahand menüsünden Kinestop panelini açın, noktaları açın ve paneli Ultrahand açma kombinasyonuyla *gizleyin*; noktalar geri gelir. Kombinasyona tekrar basınca panel görünür (noktalar duraklatılır). Panelden **B** ile çıkarsanız (Ultrahand menüsüne dönüş) noktalar duraklatılmış kalır, böylece menü görünür kalır; geri getirmek için Kinestop'u tekrar açıp kombinasyonla gizleyin. Panelde canlı tanılama bilgisi gösterilir ve `SD:/config/kinestop/sysmodule.log` dosyasına yazılır. Kararlı, yalnızca overlay'den oluşan sürüm için [orijinal sürüme](https://github.com/sertay1/Kinestop/releases) bakın.
 
 ---
 
@@ -113,6 +113,31 @@ The sysmodule writes a log to `SD:/config/kinestop/sysmodule.log`, which is the 
 * **Dots are missing from screenshots or videos:** enable **Show in Screenshots/Videos**. (Leave it off if you want clean captures.)
 * **"API mismatch":** you have mixed files from different releases; reinstall all three files from one release.
 * **Removing Kinestop:** turn the dots off, then delete `SD:/atmosphere/contents/4200000000001042/`, `SD:/switch/.overlays/kinestop.ovl` and (optionally) `SD:/config/kinestop/`.
+
+### 🧪 Test build (2.0.0-test.3)
+The Kinestop panel has a **Diagnostics (test build)** section with these toggles. They are saved in `config.ini` as `debug_flags` (the sum of the values below), so they can also be set from a PC:
+
+| Toggle | `debug_flags` | What it does |
+|---|---|---|
+| Blink test | 1 | Dots off 3 s out of every 10 s. |
+| Unscaled test layer | 2 | Layer mode **Quarter 1x**: the 640×360 image at 1:1 in the top-left quarter of the screen (the whole pattern at half size). |
+| Verbose log | 4 | One diagnostics line per second in `sysmodule.log`. |
+| Keep dots while menus open (coexistence test) | 8 | The dots are **not** paused for the Kinestop panel or the Ultrahand menu. |
+| Small 2x-scaled test layer | 16 | Layer mode **Quarter 2x**: a 320×180 image scaled 2x into the top-left quarter. If both layer toggles are on, *Unscaled* wins. |
+
+With both layer toggles off the layer mode is **Full screen 2x** (the default): the 640×360 image scaled 2x to fill the screen. The first line of the diagnostics block (`Layer: ...`) shows the mode in use.
+
+**test.3 checklist.** Turn **Verbose log** on and **Blink test** off, and turn the dots on. Then, for each layer mode (**Full screen 2x**, **Quarter 1x**, **Quarter 2x**):
+1. Pick the layer mode, then turn **Keep dots while menus open** ON (leave it on for the next modes). Note whether **the panel** stays visible and whether **the dots** appear next to it (in the top-left quarter for the two Quarter modes).
+2. Hide the panel with the combo and check that the dots move smoothly.
+3. Open the Kinestop panel again with the combo. Note whether the panel and the dots are both visible.
+4. Press **B**. Note whether **the Ultrahand menu** appears, and whether the dots are visible with it.
+5. If you have **Status Monitor**, open it from the Ultrahand menu and note whether it and the dots are both visible.
+6. Close the menus and note whether the dots are still there.
+
+If a menu disappears, wait a few seconds; if it does not come back, **reboot**. With **Start Dots at Boot** off the dots stay off after the reboot, so you can open Kinestop and change the layer mode before turning the dots on again. *Keep dots while menus open* **stays on after a reboot**: turn it off in the panel before turning the dots on. If **Start Dots at Boot** is on (the dots are back, and opening the panel repeats the test) or the panel cannot be reached, set `debug_flags` in `SD:/config/kinestop/config.ini` to `4` from a PC.
+
+Please report, per layer mode: panel visible? dots with the panel? Ultrahand menu after B? dots with the Ultrahand menu? Status Monitor? dots smooth? Attach `SD:/config/kinestop/sysmodule.log` (copy it before the next start of the dots, it is cleared then).
 
 ### 🔧 Building from source
 Requires [devkitPro](https://devkitpro.org/wiki/Getting_Started) with the `switch-dev` package (libnx) and Python 3.
@@ -209,6 +234,11 @@ Modül `SD:/config/kinestop/sysmodule.log` dosyasına bir günlük yazar. Hata b
 * **Noktalar ekran görüntülerinde veya videolarda görünmüyor:** **Görüntü ve Kayıtlarda Göster** seçeneğini açın. (Temiz kayıt istiyorsanız kapalı bırakın.)
 * **"API uyumsuz":** Farklı sürümlerin dosyaları karışmış; üç dosyayı da aynı sürümden yeniden kurun.
 * **Kinestop'u kaldırma:** Noktaları kapatın, ardından `SD:/atmosphere/contents/4200000000001042/`, `SD:/switch/.overlays/kinestop.ovl` ve (isteğe bağlı olarak) `SD:/config/kinestop/` yollarını silin.
+
+### 🧪 Deneme sürümü (2.0.0-test.3)
+Panelin **Tanılama (test sürümü)** bölümünde test ayarları vardır (`config.ini` içinde `debug_flags` olarak saklanır): **Yanıp sönme testi** (1), **Ölçeklenmemiş test katmanı** (2, Çeyrek 1x), **Ayrıntılı günlük** (4), **Menüler açıkken noktaları göster** (8), **Küçük 2x ölçekli test katmanı** (16, Çeyrek 2x). İki katman ayarı da kapalıysa mod **Tam ekran 2x**'tir (varsayılan).
+
+**test.3 kontrol listesi:** **Ayrıntılı günlük** açık, **Yanıp sönme testi** kapalı olsun. Her katman modunda (Tam ekran 2x, Çeyrek 1x, Çeyrek 2x) **Menüler açıkken noktaları göster** AÇIKKEN: paneli kombinasyonla gizleyip noktaların düzgün hareket ettiğini kontrol edin; Kinestop panelini açıp panelin ve noktaların görünüp görünmediğini not edin; **B**'ye basıp Ultrahand menüsünün görünüp görünmediğini not edin; varsa **Status Monitor**'ü de açın. Bir menü kaybolur ve birkaç saniyede geri gelmezse konsolu **yeniden başlatın**. **Açılışta Noktaları Başlat** kapalıysa noktalar yeniden başlatmadan sonra kapalı kalır; Kinestop'u açıp katman modunu değiştirdikten sonra noktaları yeniden açabilirsiniz. *Menüler açıkken noktaları göster* ayarı yeniden başlatmadan sonra da **açık kalır**: noktaları açmadan önce panelden kapatın. **Açılışta Noktaları Başlat** açıksa ya da panele ulaşamıyorsanız, bilgisayardan `SD:/config/kinestop/config.ini` dosyasındaki `debug_flags` değerini `4` yapın. Sonuçları ve `SD:/config/kinestop/sysmodule.log` dosyasını gönderin.
 
 ### 🔧 Kaynak koddan derleme
 `switch-dev` paketiyle (libnx) birlikte [devkitPro](https://devkitpro.org/wiki/Getting_Started) ve Python 3 gerekir.

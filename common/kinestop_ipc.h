@@ -52,8 +52,12 @@ typedef enum {
 
 /* KinestopWireConfig.debug_flags */
 #define KINESTOP_DEBUG_BLINK_TEST     (1u << 0)  /* layer down 3 s out of every 10 s */
-#define KINESTOP_DEBUG_UNSCALED_LAYER (1u << 1)  /* 1:1 test layer: 640x360 fb in a 960x540 (VI units) layer, top-left quarter */
+#define KINESTOP_DEBUG_UNSCALED_LAYER (1u << 1)  /* 1:1 test layer: 640x360 fb in a 960x540 (VI units) layer, top-left quarter (whole pattern, half size) */
 #define KINESTOP_DEBUG_VERBOSE_LOG    (1u << 2)  /* 1 Hz diagnostics line in sysmodule.log */
+#define KINESTOP_DEBUG_NO_SUSPEND     (1u << 3)  /* overlay never suspends the dots (layer coexistence test) */
+#define KINESTOP_DEBUG_SCALED_SMALL   (1u << 4)  /* 2x-scaled quarter test layer: 320x180 fb in a 960x540 (VI units) layer.
+                                                  * If both UNSCALED_LAYER and SCALED_SMALL are set, UNSCALED_LAYER wins. */
+#define KINESTOP_DEBUG_ALL            0x1Fu
 
 /* Mirror of kinestop::Config that the renderer needs. Index fields use the
  * same meaning as config.ini (see common/config.hpp). */

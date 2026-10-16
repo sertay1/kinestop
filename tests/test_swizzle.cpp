@@ -159,9 +159,52 @@ void test_640x360_layout() {
     CHECK(padding_free);
 }
 
+// KINESTOP_DEBUG_SCALED_SMALL (LayerMode::Quarter2x): 320x180 RGBA4444.
+// libnx framebufferCreate(): stride (320*2 + 63) & ~63 = 640 B, rows
+// (180 + 127) & ~127 = 256 -> 163,840 B per slot.
+void test_320x180_layout() {
+    const uint32_t W = 320, H = 180;
+    CHECK_EQ(aligned_width_16bpp(W), 320u);
+    CHECK_EQ(aligned_width_16bpp(W) * 2u, 640u);  // stride in bytes
+    CHECK_EQ(aligned_height(H), 256u);
+    CHECK_EQ(buffer_size_16bpp(W, H), 163840u);
+    CHECK_EQ(2u * buffer_size_16bpp(W, H), 327680u);
+    CHECK_EQ((2u * buffer_size_16bpp(W, H)) % 0x1000u, 0u);  // libnx page-aligns the total
+
+    // Same numbers as the libnx port (oracle 2) derives.
+    const std::vector<uint32_t> map = libnx_blocklinear_map(W, H);
+    CHECK_EQ((uint32_t)map.size() * 16u, buffer_size_16bpp(W, H));
+
+    const uint32_t units = buffer_size_16bpp(W, H) / 2;
+    std::vector<uint8_t> seen(units, 0);
+    bool in_range = true, unique = true;
+    for (uint32_t y = 0; y < H; ++y)
+        for (uint32_t x = 0; x < W; ++x) {
+            const uint32_t off = pixel_offset_16bpp(x, y, W);
+            if (off >= units) { in_range = false; continue; }
+            if (seen[off]++) unique = false;
+        }
+    CHECK(in_range);
+    CHECK(unique);
+
+    bool padding_free = true;
+    for (uint32_t y = H; y < aligned_height(H); ++y)
+        for (uint32_t x = 0; x < W; ++x)
+            if (seen[pixel_offset_16bpp(x, y, W)]) padding_free = false;
+    CHECK(padding_free);
+
+    // libtesla's formula agrees for this width too (320 is a multiple of 32).
+    const uint32_t owv = tesla_offset_width_var(W);
+    bool tesla_ok = true;
+    for (uint32_t y = 0; y < H && tesla_ok; ++y)
+        for (uint32_t x = 0; x < W; ++x)
+            if (pixel_offset_16bpp(x, y, W) != tesla_get_pixel_offset(x, y, owv)) { tesla_ok = false; break; }
+    CHECK(tesla_ok);
+}
+
 void test_reference_impls() {
     struct { uint32_t w, h; } sizes[] = {
-        {640, 360}, {448, 720}, {1280, 720}, {1920, 1080}, {100, 50}, {33, 130}, {32, 8}, {1, 1},
+        {640, 360}, {320, 180}, {448, 720}, {1280, 720}, {1920, 1080}, {100, 50}, {33, 130}, {32, 8}, {1, 1},
     };
     for (auto s : sizes) {
         const std::vector<uint32_t> map = libnx_blocklinear_map(s.w, s.h);
@@ -189,8 +232,7 @@ void test_reference_impls() {
 // starting at gob_offset_16bpp() of the GOB's top-left pixel. That is only
 // enough if every pixel of the GOB lands inside those 512 bytes and distinct
 // GOBs do not overlap.
-void test_gob_offsets() {
-    const uint32_t w = 640, h = 384;
+void test_gob_offsets_for(uint32_t w, uint32_t h) {
     const uint32_t gobs = buffer_size_16bpp(w, h) / kinestop::swizzle::GOB_BYTES;
     std::vector<uint32_t> owner(gobs, UINT32_MAX);
     bool inside = true, aligned = true, unique = true;
@@ -210,11 +252,17 @@ void test_gob_offsets() {
     CHECK_ALL(unique, "two GOBs share a gob_offset_16bpp()");
 }
 
+void test_gob_offsets() {
+    test_gob_offsets_for(640, 384);  // 640x360, padded
+    test_gob_offsets_for(320, 256);  // 320x180, padded
+}
+
 } // namespace
 
 int main() {
     test_tesla_widths();
     test_640x360_layout();
+    test_320x180_layout();
     test_reference_impls();
     test_gob_offsets();
     return check::summary("swizzle");

@@ -1,7 +1,7 @@
 {
   "name": "Kinestop",
   "tid": "4200000000001042",
-  "version": "2.0.0-test.2",
+  "version": "2.0.0-test.3",
   "requires_reboot": false,
   "shutdown_service": "kinestop",
   "shutdown_cmd": 3

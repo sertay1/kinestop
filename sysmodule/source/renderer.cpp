@@ -18,8 +18,9 @@
 //     Null (the stack of the empty display). None of them is needed for the
 //     LCD or a TV (Default + Lcd), so we leave them out.
 //   * The framebuffer is 640x360 and the layer is the whole 1920x1080 VI
-//     space, so VI upscales it 3x (FitToLayer). KINESTOP_DEBUG_UNSCALED_LAYER
-//     shrinks the layer to 960x540 VI units (1:1 in handheld) instead.
+//     space, so VI upscales it 3x (FitToLayer). The debug LayerModes shrink
+//     the layer to 960x540 VI units, with a 640x360 (Quarter1x: 1:1 in
+//     handheld) or 320x180 (Quarter2x) framebuffer; see LayerMode.
 //   * Buffers are dequeued/queued by hand instead of framebufferBegin/End,
 //     which call diagAbortWithResult() on failure. Here a failure just tears
 //     the layer down so the main loop can retry.
@@ -82,6 +83,14 @@ void flush_rect(const raster::Surface& s, const raster::Rect& r) {
 
 } // namespace
 
+const char* layer_mode_name(LayerMode mode) {
+    switch (mode) {
+        case LayerMode::Quarter1x: return "quarter1x";
+        case LayerMode::Quarter2x: return "quarter2x";
+        default:                   return "full2x";
+    }
+}
+
 Renderer::Renderer()
     : m_vi_ok(false)
     , m_display_ok(false)
@@ -90,7 +99,9 @@ Renderer::Renderer()
     , m_nwin_ok(false)
     , m_fb_ok(false)
     , m_in_captures(false)
-    , m_unscaled(false)
+    , m_mode(LayerMode::Full2x)
+    , m_fb_width(FB_WIDTH)
+    , m_fb_height(FB_HEIGHT)
     , m_underscan_z(false)
     , m_normal_z(0)
     , m_soft_rc(0)
@@ -144,11 +155,16 @@ Result Renderer::update_z() {
     return rc;
 }
 
-Result Renderer::init(bool show_in_captures, bool unscaled, KinestopStage& stage) {
+Result Renderer::init(bool show_in_captures, LayerMode mode, KinestopStage& stage) {
     if (m_fb_ok) return 0;
     teardown();  // clean slate if a previous attempt got partway
     m_soft_rc = 0;
     m_info = LayerInfo{};
+
+    const bool quarter = mode != LayerMode::Full2x;
+    const bool small = mode == LayerMode::Quarter2x;
+    m_fb_width = small ? SMALL_FB_WIDTH : FB_WIDTH;
+    m_fb_height = small ? SMALL_FB_HEIGHT : FB_HEIGHT;
 
     Result rc;
 
@@ -207,8 +223,8 @@ Result Renderer::init(bool show_in_captures, bool unscaled, KinestopStage& stage
     m_in_captures = show_in_captures;
 
     stage = KinestopStage_Layer;
-    m_info.width = unscaled ? UNSCALED_LAYER_WIDTH : LAYER_WIDTH;
-    m_info.height = unscaled ? UNSCALED_LAYER_HEIGHT : LAYER_HEIGHT;
+    m_info.width = quarter ? QUARTER_LAYER_WIDTH : LAYER_WIDTH;
+    m_info.height = quarter ? QUARTER_LAYER_HEIGHT : LAYER_HEIGHT;
     rc = viSetLayerSize(&m_layer, m_info.width, m_info.height);
     if (R_FAILED(rc)) goto fail;
     rc = viSetLayerPosition(&m_layer, 0.0f, 0.0f);
@@ -218,11 +234,11 @@ Result Renderer::init(bool show_in_captures, bool unscaled, KinestopStage& stage
     rc = nwindowCreateFromLayer(&m_window, &m_layer);
     if (R_FAILED(rc)) goto fail;
     m_nwin_ok = true;
-    rc = nwindowSetDimensions(&m_window, FB_WIDTH, FB_HEIGHT);
+    rc = nwindowSetDimensions(&m_window, m_fb_width, m_fb_height);
     if (R_FAILED(rc)) goto fail;
 
     stage = KinestopStage_Framebuffer;
-    rc = framebufferCreate(&m_fb, &m_window, FB_WIDTH, FB_HEIGHT, PIXEL_FORMAT_RGBA_4444, NUM_FBS);
+    rc = framebufferCreate(&m_fb, &m_window, m_fb_width, m_fb_height, PIXEL_FORMAT_RGBA_4444, NUM_FBS);
     if (R_FAILED(rc)) goto fail;
     m_fb_ok = true;
 
@@ -231,9 +247,11 @@ Result Renderer::init(bool show_in_captures, bool unscaled, KinestopStage& stage
     armDCacheFlush(m_fb.buf, (size_t)m_fb.fb_size * NUM_FBS);
     std::memset(m_dirty_count, 0, sizeof(m_dirty_count));
 
-    m_unscaled = unscaled;
+    m_mode = mode;
+    m_info.fb_width = m_fb_width;
+    m_info.fb_height = m_fb_height;
     m_info.in_captures = show_in_captures;
-    m_info.unscaled = unscaled;
+    m_info.mode = mode;
     stage = KinestopStage_None;
     return 0;
 
@@ -245,8 +263,8 @@ fail:
 raster::Surface Renderer::surface_for_slot(s32 slot) {
     return raster::Surface{
         reinterpret_cast<u16*>(static_cast<u8*>(m_fb.buf) + (size_t)slot * m_fb.fb_size),
-        FB_WIDTH,
-        FB_HEIGHT,
+        m_fb_width,
+        m_fb_height,
     };
 }
 
@@ -472,7 +490,7 @@ void Renderer::teardown() {
         m_vi_ok = false;
     }
     m_in_captures = false;
-    m_unscaled = false;
+    m_mode = LayerMode::Full2x;
     m_underscan_z = false;
     std::memset(m_dirty_count, 0, sizeof(m_dirty_count));
 }

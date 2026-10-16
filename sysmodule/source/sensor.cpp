@@ -31,6 +31,21 @@ float magnitude(const HidVector& v) {
     return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
 }
 
+// Copies v into prev and returns true when it differs bit for bit (a real
+// IMU's noise changes at least one value on nearly every sample).
+bool values_changed(float (&prev)[6], const float (&v)[6]) {
+    const bool changed = std::memcmp(prev, v, sizeof(prev)) != 0;
+    std::memcpy(prev, v, sizeof(prev));
+    return changed;
+}
+
+// The pattern a placeholder six-axis state carries: accel exactly (0,0,-1)
+// with zero angular velocity (also flagged " STUB" in the diag line).
+bool is_stub(const HidSixAxisSensorState& st) {
+    return st.acceleration.x == 0.0f && st.acceleration.y == 0.0f && st.acceleration.z == -1.0f &&
+           st.angular_velocity.x == 0.0f && st.angular_velocity.y == 0.0f && st.angular_velocity.z == 0.0f;
+}
+
 // hidInitializeNpad() sends exactly this, but calls diagAbortWithResult() when
 // it fails (libnx hid.c). Same revision table as libnx's _hidActivateNpad().
 Result activate_npad() {
@@ -77,7 +92,17 @@ SensorManager::SensorManager()
     , m_seven_rc(0)
     , m_seven{}
     , m_seven_fresh_tick(0)
+    , m_npad_last_tick(0)
+    , m_npad_streak_tick(0)
+    , m_last_call_tick(0)
+    , m_seven_change_tick(0)
+    , m_current(KinestopSensor_None)
+    , m_raw{}
 {
+    m_raw.npad_index = -1;
+    std::memset(m_seven_prev, 0, sizeof(m_seven_prev));
+    std::memset(m_npad_change_tick, 0, sizeof(m_npad_change_tick));
+    std::memset(m_npad_prev, 0, sizeof(m_npad_prev));
     std::memset(m_handles, 0, sizeof(m_handles));
     std::memset(m_valid, 0, sizeof(m_valid));
     std::memset(m_started, 0, sizeof(m_started));
@@ -225,13 +250,26 @@ bool SensorManager::sample(SensorSample& out) {
     if (!m_initialized) return false;
 
     // Every source is read on every call so each one's advance is tracked
-    // (and logged) even while another is preferred.
-    bool have = false;
+    // (and logged) even while the other is current.
     const u64 now = armGetSystemTick();
+    auto within = [now](u64 tick, u64 ns) { return tick != 0 && armTicksToNs(now - tick) < ns; };
+
+    // npad hold: NPAD_HOLD_NS, but at least 1.5 x the time since the previous
+    // call, so at low poll rates (10 Hz = 100 ms between calls) consecutive
+    // ticks with fresh npad data still count as one gap-free run, while a
+    // tick without npad data still breaks it.
+    u64 npad_hold = NPAD_HOLD_NS;
+    if (m_last_call_tick != 0) {
+        const u64 gap = armTicksToNs(now - m_last_call_tick);
+        if (gap + gap / 2 > npad_hold) npad_hold = gap + gap / 2;
+    }
+    m_last_call_tick = now;
 
     // 1. SevenSixAxisSensor. Field mapping exactly as in the original v1
     //    sensor: unk_x18[0..2] acceleration, [3..5] angular velocity,
     //    normalised to G's when it looks like m/s^2.
+    bool seven_fresh = false;
+    SensorSample seven{};
     if (m_seven_initialized) {
         HidSevenSixAxisSensorState st;
         std::memset(&st, 0, sizeof(st));
@@ -249,22 +287,26 @@ bool SensorManager::sample(SensorSample& out) {
                     ay /= 9.80665f;
                     az /= 9.80665f;
                 }
-                out.accel = Vec3f(ax, ay, az);
-                out.gyro = Vec3f(st.unk_x18[3], st.unk_x18[4], st.unk_x18[5]);
-                out.source = KinestopSensor_SevenSixAxis;
-                out.advance = advance;
-                out.npad_index = -1;
-                have = true;
+                seven.accel = Vec3f(ax, ay, az);
+                seven.gyro = Vec3f(st.unk_x18[3], st.unk_x18[4], st.unk_x18[5]);
+                seven.source = KinestopSensor_SevenSixAxis;
+                seven.advance = advance;
+                seven.npad_index = -1;
+                seven_fresh = true;
                 m_seven_fresh_tick = now;
+                const float v[6] = {st.unk_x18[0], st.unk_x18[1], st.unk_x18[2],
+                                    st.unk_x18[3], st.unk_x18[4], st.unk_x18[5]};
+                if (values_changed(m_seven_prev, v)) m_seven_change_tick = now;
+                m_raw.seven_accel = seven.accel;
+                m_raw.seven_gyro = seven.gyro;
             }
         }
     }
 
-    // While the SevenSixAxis stream is alive, a tick on which it simply has
-    // no new sample yet is skipped instead of being filled from an npad
-    // handle, so the filter is not fed from two sources tick by tick.
-    const bool seven_holding = !have && m_seven_fresh_tick != 0 &&
-                               armTicksToNs(now - m_seven_fresh_tick) < SEVEN_HOLD_NS;
+    // SevenSixAxis is streaming values that change: an npad handle that
+    // looks fake (stub pattern, or frozen) must not shut it out.
+    const bool seven_alive = within(m_seven_fresh_tick, SEVEN_HOLD_NS);
+    const bool seven_moving = seven_alive && within(m_seven_change_tick, NPAD_STUCK_NS);
 
     // 2. Npad handles, handheld first. All of them are read (and tracked)
     //    first; then the sample comes from the highest-priority handle HID
@@ -273,11 +315,14 @@ bool SensorManager::sample(SensorSample& out) {
     //    is skipped instead of being filled from a lower-priority or
     //    not-connected handle (e.g. a stale handheld LIFO once docked), so
     //    the filter is never fed from two devices with different axes.
+    //    Only the newest state of the chosen handle is used; the caller
+    //    integrates over the time since the previous consumed sample.
     HidSixAxisSensorState states[MAX_HANDLES];
     u32 advances[MAX_HANDLES];
     bool usable[MAX_HANDLES];
     bool connected[MAX_HANDLES];
-    int held = -1;  // highest-priority connected handle that advanced within NPAD_HOLD_NS
+    int held = -1;  // highest-priority connected handle that advanced within the npad hold
+    bool raw_done = false;
     for (int i = 0; i < MAX_HANDLES; ++i) {
         usable[i] = false;
         connected[i] = false;
@@ -288,40 +333,84 @@ bool SensorManager::sample(SensorSample& out) {
         if (hidGetSixAxisSensorStates(m_handles[i], &states[i], 1) == 0) continue;
 
         advances[i] = m_npad[i].update(states[i].sampling_number);
-        if (advances[i] == 0 || magnitude(states[i].acceleration) <= 0.05f) continue;
+        if (advances[i] == 0) continue;
+
+        const HidSixAxisSensorState& st = states[i];
+        const float v[6] = {st.acceleration.x, st.acceleration.y, st.acceleration.z,
+                            st.angular_velocity.x, st.angular_velocity.y, st.angular_velocity.z};
+        if (values_changed(m_npad_prev[i], v)) m_npad_change_tick[i] = now;
+        const bool suspect = seven_moving && (is_stub(st) || !within(m_npad_change_tick[i], NPAD_STUCK_NS));
+        if (!raw_done) {
+            raw_done = true;
+            m_raw.npad_accel = Vec3f(v[0], v[1], v[2]);
+            m_raw.npad_gyro = Vec3f(v[3], v[4], v[5]);
+            m_raw.npad_index = (s8)i;
+            m_raw.npad_suspect = suspect;
+        }
+
+        if (suspect || magnitude(st.acceleration) <= 0.05f) continue;
         usable[i] = true;
-        connected[i] = (states[i].attributes & HidSixAxisSensorAttribute_IsConnected) != 0;
+        connected[i] = (st.attributes & HidSixAxisSensorAttribute_IsConnected) != 0;
         if (connected[i]) m_npad_fresh_tick[i] = now;
     }
     for (int i = 0; i < MAX_HANDLES && held < 0; ++i) {
-        if (m_npad_fresh_tick[i] != 0 && armTicksToNs(now - m_npad_fresh_tick[i]) < NPAD_HOLD_NS)
+        if (within(m_npad_fresh_tick[i], npad_hold))
             held = i;
     }
 
     int best = -1;
-    if (!have && !seven_holding) {
-        if (held >= 0) {
-            // Only the held handle counts (it was refreshed above if it
-            // advanced on this call; otherwise this tick has no sample).
-            if (usable[held] && connected[held]) best = held;
-        } else {
-            // Nothing connected advanced recently: first advancing handle.
-            for (int i = 0; i < MAX_HANDLES && best < 0; ++i)
-                if (usable[i]) best = i;
-        }
+    if (held >= 0) {
+        // Only the held handle counts (it was refreshed above if it advanced
+        // on this call; otherwise this tick has no npad sample).
+        if (usable[held] && connected[held]) best = held;
+    } else {
+        // Nothing connected advanced recently: first advancing handle.
+        for (int i = 0; i < MAX_HANDLES && best < 0; ++i)
+            if (usable[i]) best = i;
     }
 
     if (best >= 0) {
+        // A gap longer than the hold time starts a new run.
+        if (!within(m_npad_last_tick, npad_hold)) m_npad_streak_tick = now;
+        m_npad_last_tick = now;
+    }
+
+    // 3. Pick the source (see sensor.hpp): npad preferred, SevenSixAxis as
+    //    fallback, each held through short gaps.
+    const bool npad_alive = within(m_npad_last_tick, npad_hold);
+    const bool npad_settled = npad_alive && armTicksToNs(now - m_npad_streak_tick) >= NPAD_SETTLE_NS;
+    switch (m_current) {
+        case KinestopSensor_NpadSixAxis:
+            if (!npad_alive)
+                m_current = seven_alive ? KinestopSensor_SevenSixAxis : KinestopSensor_None;
+            break;
+        case KinestopSensor_SevenSixAxis:
+            if (npad_settled || (npad_alive && !seven_alive))
+                m_current = KinestopSensor_NpadSixAxis;
+            else if (!seven_alive)
+                m_current = KinestopSensor_None;
+            break;
+        default:
+            // Nothing to stay with: take whatever streams, npad first.
+            m_current = npad_alive ? KinestopSensor_NpadSixAxis
+                      : seven_alive ? KinestopSensor_SevenSixAxis : KinestopSensor_None;
+            break;
+    }
+
+    if (m_current == KinestopSensor_NpadSixAxis && best >= 0) {
         const HidSixAxisSensorState& st = states[best];
         out.accel = Vec3f(st.acceleration.x, st.acceleration.y, st.acceleration.z);
         out.gyro = Vec3f(st.angular_velocity.x, st.angular_velocity.y, st.angular_velocity.z);
         out.source = KinestopSensor_NpadSixAxis;
         out.advance = advances[best];
         out.npad_index = (s8)best;
-        have = true;
+        return true;
     }
-
-    return have;
+    if (m_current == KinestopSensor_SevenSixAxis && seven_fresh) {
+        out = seven;
+        return true;
+    }
+    return false;
 }
 
 } // namespace kinestop

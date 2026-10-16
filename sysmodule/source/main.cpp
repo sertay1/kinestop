@@ -2,17 +2,20 @@
 //
 // Original Kinestop by SertAy (https://github.com/sertay1/Kinestop). The
 // sysmodule/overlay split is a modification of the original project: this
-// process owns the IMU, the complementary filter and a 640x360 VI layer; the
+// process owns the IMU, the complementary filter and a VI layer with a
+// 640x360 framebuffer (320x180 in the Quarter2x debug mode); the
 // Tesla/Ultrahand overlay is only a settings panel that launches it with
 // pmshellLaunchProgram and talks to it over the "kinestop" service
 // (common/kinestop_ipc.h).
 //
-// Threads (both on core 3, both BELOW nx-ovlloader's main/render thread,
+// Threads (all on core 3, all BELOW nx-ovlloader's main/render thread,
 // which runs at priority 49 on core 3, so a Tesla menu always preempts us):
-//   main  - sample IMU, filter, compute dot positions, present (paced to
-//           poll_rate_hz); owns the renderer and the sensor. Priority 59
-//           (kinestop.json main_thread_priority).
-//   ipc   - serves the "kinestop" service; touches only g_state. Priority 58.
+//   main   - sample IMU, filter, compute dot positions, present (paced to
+//            poll_rate_hz); owns the renderer and the sensor. Priority 59
+//            (kinestop.json main_thread_priority).
+//   ipc    - serves the "kinestop" service; touches only g_state. Priority 58.
+//   logger - drains the log ring buffer to the SD card (log.cpp); the only
+//            thread that does SD I/O after startup. Priority 62.
 
 #include <switch.h>
 #include <cmath>
@@ -24,13 +27,14 @@
 #include "../../common/dots.hpp"
 #include "../../common/math_types.hpp"
 #include "filter.hpp"
+#include "frame_scale.hpp"
 #include "ipc_server.h"
 #include "log.hpp"
 #include "renderer.hpp"
 #include "sensor.hpp"
 
 #ifndef APP_VERSION
-#define APP_VERSION "2.0.0-test.2"
+#define APP_VERSION "2.0.0-test.3"
 #endif
 
 // ---------------------------------------------------------------------------
@@ -48,6 +52,8 @@
 //                         cannot fragment around it)
 //   framebufferCreate()   640x360 RGBA4444: stride 1280 B, height padded to
 //                         384 rows -> 491,520 B/slot x 2 =       983,040 B
+//                         (Quarter2x debug mode: 320x180, stride 640 B,
+//                         256 rows -> 163,840 B/slot x 2 = 327,680 B)
 //                         (__libnx_aligned_alloc(0x1000), up to 4 KiB lost
 //                         to alignment)
 //   nvInitialize()        transfer memory, __nx_nv_transfermem_size
@@ -55,17 +61,22 @@
 //                         (tmemCreate -> __libnx_aligned_alloc(0x1000))
 //   threadCreate()        IPC thread: 8 KiB stack + 576 B struct _reent
 //                         + TLS image, page-aligned allocation      ~16,384 B
+//                         logger thread (log.cpp): 12 KiB stack + the
+//                         same, page-aligned                         ~16,384 B
 //   newlib stdio          FILE glue (4 x 184 B) + one BUFSIZ buffer
-//                         per open file, strtof bigints              ~4,096 B
+//                         per open file (config.ini at startup; the
+//                         log uses open/write/close, no FILE), fd
+//                         table entries, strtof bigints             ~4,096 B
 //   fsdev                 cwd buffer disabled (__nx_fsdev_support_cwd)   0 B
 // vi, binder/parcels, nvmap, nvfence, hid and sm allocate nothing from the
 // heap (parcels live on the stack; hid maps its 0x40000 shared memory into
-// address space owned by hid). Sum ~1.59 MiB; the rest of the 1.75 MiB is
+// address space owned by hid). Sum ~1.61 MiB; the rest of the 1.75 MiB is
 // slack for malloc headers, fragmentation across layer re-creation
 // (framebuffers + nv transfer memory are freed and re-allocated on every
 // suspend/resume, blink cycle or layer re-creation) and the 4 KiB memalign
 // over-allocations.
-// Not heap: main thread stack (npdm main_thread_stack_size 0x4000).
+// Not heap: main thread stack (npdm main_thread_stack_size 0x4000), the
+// 12 KiB log ring buffer (.bss).
 // ---------------------------------------------------------------------------
 #define INNER_HEAP_SIZE 0x1C0000  // 1.75 MiB (1.25 MiB + 0x80000 for SevenSixAxis)
 
@@ -211,6 +222,7 @@ Result ipc_handler(void* userdata, const IpcServerRequest* r, u8* out_data, size
             // The reply goes out when this returns (ipc_server replies after
             // the handler); the render loop then cleans up and main returns.
             kinestop::log::write("Exit requested over IPC");
+            kinestop::log::flush();  // the overlay kills us 0.5 s after Exit if we hang
             request_exit();
             return 0;
 
@@ -316,21 +328,24 @@ bool is_layer_stage(u32 stage) {
 // already shows the right picture and presenting again is skipped.
 struct FrameKey {
     u32 config_gen;
-    s32 qx, qy;  // shared dot offset in quarter framebuffer pixels
+    s32 qx, qy;  // shared dot offset in 1/frame_scale::OFFSET_QUANTUM framebuffer pixels
     bool operator!=(const FrameKey& o) const {
         return config_gen != o.config_gen || qx != o.qx || qy != o.qy;
     }
 };
 
-constexpr float FB_SCALE = (float)kinestop::Renderer::FB_WIDTH / kinestop::dots::LOGICAL_WIDTH;  // 0.5
-constexpr float OFFSET_QUANTUM = 4.0f;  // steps per framebuffer pixel
+static_assert(kinestop::frame_scale::LOGICAL_WIDTH == kinestop::dots::LOGICAL_WIDTH,
+              "frame_scale.hpp and dots.hpp disagree on the logical width");
 
-void build_frame(const Config& cfg, const FrameKey& key, kinestop::DotFrame& frame) {
+// Logical px -> framebuffer px, offset quantization and the dot core/ring
+// sizes live in frame_scale.hpp (host-tested in tests/test_scale.cpp).
+void build_frame(const Config& cfg, const FrameKey& key, float fb_scale, kinestop::DotFrame& frame) {
     namespace dots = kinestop::dots;
+    namespace fs = kinestop::frame_scale;
 
     // Back to logical px from the quantized framebuffer offset.
-    const float dx = (float)key.qx / (OFFSET_QUANTUM * FB_SCALE);
-    const float dy = (float)key.qy / (OFFSET_QUANTUM * FB_SCALE);
+    const float dx = fs::dequantize_offset(key.qx, fb_scale);
+    const float dy = fs::dequantize_offset(key.qy, fb_scale);
 
     dots::Point anchors[dots::MAX_ANCHORS];
     frame.count = dots::get_anchors(cfg.visual.style, cfg.visual.density, anchors, dots::MAX_ANCHORS);
@@ -346,9 +361,8 @@ void build_frame(const Config& cfg, const FrameKey& key, kinestop::DotFrame& fra
             py = kinestop::clamp(py, 10.0f, 710.0f);
         }
 
-        // Logical pixel x covers [x, x+1); its centre maps to (x + 0.5) * scale.
-        frame.centers[i].x = (px + 0.5f) * FB_SCALE;
-        frame.centers[i].y = (py + 0.5f) * FB_SCALE;
+        frame.centers[i].x = fs::center_fb(px, fb_scale);
+        frame.centers[i].y = fs::center_fb(py, fb_scale);
     }
 
     int theme_idx = cfg.visual.color;
@@ -359,17 +373,10 @@ void build_frame(const Config& cfg, const FrameKey& key, kinestop::DotFrame& fra
     alpha_255 = alpha_255 < 25 ? 25 : (alpha_255 > 255 ? 255 : alpha_255);
     const int border_alpha = alpha_255 + 50 > 255 ? 255 : alpha_255 + 50;
 
-    // The original's draw_filled_circle() fills every pixel within
-    // ceil(radius), so the visible core is ceil(SIZES[i] * 0.9) logical px:
-    // 1, 2, 3, ... 9, 11 - ten distinct sizes, the smallest 0.5 fb px.
-    frame.style.core_radius = std::ceil(dots::dot_radius(cfg)) * FB_SCALE;
-
-    // The original outlines the core with a ~1-logical-px circle at
-    // radius + 2, leaving a ~1 px gap. At half resolution that ring and gap
-    // would be 0.5 fb px each and blur into a faint smear, so the ring here
-    // is a solid 1 fb px (2 logical px) band directly around the core,
-    // ending at about the same outer radius as the original's.
-    frame.style.ring_width = 1.0f;
+    // Core: ceil of the original's radius, never below 0.5 fb px. Ring: a
+    // solid 2-logical-px band, never below 1 fb px (see frame_scale.hpp).
+    frame.style.core_radius = fs::core_radius_fb(dots::dot_radius(cfg), fb_scale);
+    frame.style.ring_width = fs::ring_width_fb(fb_scale);
     frame.style.core = {theme.cr, theme.cg, theme.cb, (u8)alpha_255};
     frame.style.border = {theme.br, theme.bg, theme.bb, (u8)border_alpha};
 }
@@ -421,7 +428,7 @@ int main(int argc, char* argv[]) {
 
     const u64 start_tick = armGetSystemTick();
 
-    kinestop::log::init();
+    kinestop::log::init();  // starts the logger thread
     kinestop::log::write("Kinestop sysmodule " APP_VERSION " started (hos %u.%u.%u)",
                          HOSVER_MAJOR(hosversionGet()), HOSVER_MINOR(hosversionGet()), HOSVER_MICRO(hosversionGet()));
 
@@ -429,10 +436,13 @@ int main(int argc, char* argv[]) {
     if (!config.load())
         kinestop::log::write("config.ini not found, using defaults");
     if (config.general.debug_flags)
-        kinestop::log::write("debug_flags %d (blink %d, unscaled %d, verbose %d)", config.general.debug_flags,
+        kinestop::log::write("debug_flags %d (blink %d, unscaled %d, verbose %d, no_suspend %d, scaled_small %d)",
+                             config.general.debug_flags,
                              (config.general.debug_flags & KINESTOP_DEBUG_BLINK_TEST) ? 1 : 0,
                              (config.general.debug_flags & KINESTOP_DEBUG_UNSCALED_LAYER) ? 1 : 0,
-                             (config.general.debug_flags & KINESTOP_DEBUG_VERBOSE_LOG) ? 1 : 0);
+                             (config.general.debug_flags & KINESTOP_DEBUG_VERBOSE_LOG) ? 1 : 0,
+                             (config.general.debug_flags & KINESTOP_DEBUG_NO_SUSPEND) ? 1 : 0,
+                             (config.general.debug_flags & KINESTOP_DEBUG_SCALED_SMALL) ? 1 : 0);
 
     // general.enabled is not checked: it is the overlay's master-toggle
     // state. Being launched at all (overlay, boot2.flag, or a sysmodule
@@ -452,6 +462,7 @@ int main(int argc, char* argv[]) {
         // Without the service nobody could stop us gracefully or change
         // settings; do not leave an unmanageable layer on screen.
         kinestop::log::write("ipcServerInit failed: rc 0x%X, exiting", (unsigned)rc);
+        kinestop::log::exit();
         return 0;
     }
 
@@ -464,6 +475,7 @@ int main(int argc, char* argv[]) {
     if (R_FAILED(rc)) {
         kinestop::log::write("IPC thread failed: rc 0x%X, exiting", (unsigned)rc);
         ipcServerExit(&g_server);
+        kinestop::log::exit();
         return 0;
     }
 
@@ -513,7 +525,6 @@ int main(int argc, char* argv[]) {
     KinestopSensorSource source = KinestopSensor_None;
     s8 npad_index = -1;                       // npad handle of the last NpadSixAxis sample
     u32 seen_sources = 0;                     // bit per KinestopSensorSource already logged
-    kinestop::SensorSample last_sample{};
 
     // Per-second accumulators and the values of the last full second.
     u32 advance_acc = 0;
@@ -529,27 +540,37 @@ int main(int argc, char* argv[]) {
     bool sensor_ok = false;
 
     // One diagnostics line: everything needed to tell a frozen sensor, a
-    // stalled present and a layer that is not composited apart.
+    // stalled present and a layer that is not composited apart. The newest
+    // values of BOTH sources are logged (a7/g7 SevenSixAxis, anN/gn npad
+    // handle N), whichever is current, so a log shows whether npad carries
+    // real IMU data. STUB: the npad values are the placeholder pattern;
+    // SUSPECT: the sensor is ignoring that npad handle as fake (sensor.hpp).
     auto log_diag = [&](u64 now) {
         const kinestop::PresentStats& ps = renderer.stats();
-        const bool stub = last_sample.accel.x == 0.0f && last_sample.accel.y == 0.0f &&
-                          last_sample.accel.z == -1.0f && last_sample.gyro.x == 0.0f &&
-                          last_sample.gyro.y == 0.0f && last_sample.gyro.z == 0.0f;
+        const kinestop::SensorRaw& raw = sensor.raw();
+        const bool stub = raw.npad_index >= 0 && raw.npad_accel.x == 0.0f && raw.npad_accel.y == 0.0f &&
+                          raw.npad_accel.z == -1.0f && raw.npad_gyro.x == 0.0f &&
+                          raw.npad_gyro.y == 0.0f && raw.npad_gyro.z == 0.0f;
         const char* layer = renderer.ready() ? "up" : suspended ? "suspended" : blink_down ? "blink" : "down";
         kinestop::log::write(
-            "diag t=%s it=%u src=%s ok=%d adv=%u s7=%u np=%u/%d sw=%u a=%s,%s,%s g=%s,%s,%s%s p=%s r=%s "
-            "fr=%u dqto=%u fto=%u fe=%u/0x%X wb=%u ew=%u maxp=%uus maxit=%uus logw=%uus layer=%s",
+            "diag t=%s it=%u src=%s ok=%d adv=%u s7=%u np=%u/%d sw=%u a7=%s,%s,%s g7=%s,%s,%s an%d=%s,%s,%s "
+            "gn=%s,%s,%s%s%s p=%s r=%s "
+            "fr=%u dqto=%u fto=%u fe=%u/0x%X wb=%u ew=%u maxp=%uus maxit=%uus logw=%uus lwr=%uus layer=%s",
             seconds(ms_since_start(now)).text, (unsigned)iterations,
             kinestop::SensorManager::source_name(source), sensor_ok ? 1 : 0, (unsigned)advance_1s,
             (unsigned)window_1s.seven_advance, (unsigned)window_1s.npad_advance, (int)window_1s.npad_index,
             (unsigned)switches_1s,
-            fixed(last_sample.accel.x, 3).text, fixed(last_sample.accel.y, 3).text, fixed(last_sample.accel.z, 3).text,
-            fixed(last_sample.gyro.x, 3).text, fixed(last_sample.gyro.y, 3).text, fixed(last_sample.gyro.z, 3).text,
-            stub ? " STUB" : "", fixed(ori.pitch_deg, 1).text, fixed(ori.roll_deg, 1).text,
+            fixed(raw.seven_accel.x, 3).text, fixed(raw.seven_accel.y, 3).text, fixed(raw.seven_accel.z, 3).text,
+            fixed(raw.seven_gyro.x, 3).text, fixed(raw.seven_gyro.y, 3).text, fixed(raw.seven_gyro.z, 3).text,
+            (int)raw.npad_index,
+            fixed(raw.npad_accel.x, 3).text, fixed(raw.npad_accel.y, 3).text, fixed(raw.npad_accel.z, 3).text,
+            fixed(raw.npad_gyro.x, 3).text, fixed(raw.npad_gyro.y, 3).text, fixed(raw.npad_gyro.z, 3).text,
+            stub ? " STUB" : "", raw.npad_suspect ? " SUSPECT" : "",
+            fixed(ori.pitch_deg, 1).text, fixed(ori.roll_deg, 1).text,
             (unsigned)frames, (unsigned)ps.dequeue_timeouts, (unsigned)ps.fence_timeouts,
             (unsigned)ps.fence_errors, (unsigned)ps.last_fence_rc,
             (unsigned)ps.would_blocks, (unsigned)ps.event_wakes, (unsigned)max_present_1s,
-            (unsigned)max_busy_1s, kinestop::log::take_max_write_us(), layer);
+            (unsigned)max_busy_1s, kinestop::log::take_max_write_us(), kinestop::log::take_max_drain_us(), layer);
     };
 
     // Takes the layer down on purpose (suspend, blink test, settings change).
@@ -621,7 +642,6 @@ int main(int argc, char* argv[]) {
             ori = filter.update(smp.accel, smp.gyro, dt, local);
             last_sample_tick = frame_start;
             have_sample = true;
-            last_sample = smp;
             advance_acc += smp.advance;
         }
         sensor_ok = have_sample && (frame_start - last_sample_tick) < sensor_fresh_ticks;
@@ -632,19 +652,23 @@ int main(int argc, char* argv[]) {
         if (!want_layer && renderer.ready())
             layer_down(frame_start, suspended ? "suspended" : "blink test");
 
-        // Layer stack membership and size are fixed when the layer is created.
-        const bool want_unscaled = (dbg & KINESTOP_DEBUG_UNSCALED_LAYER) != 0;
+        // Layer stack membership and sizes are fixed when the layer is
+        // created. UNSCALED_LAYER wins over SCALED_SMALL.
+        const kinestop::LayerMode want_mode =
+            (dbg & KINESTOP_DEBUG_UNSCALED_LAYER) ? kinestop::LayerMode::Quarter1x
+            : (dbg & KINESTOP_DEBUG_SCALED_SMALL) ? kinestop::LayerMode::Quarter2x
+                                                  : kinestop::LayerMode::Full2x;
         if (renderer.ready() && (renderer.in_captures() != local.visual.show_in_captures ||
-                                 renderer.unscaled() != want_unscaled)) {
-            kinestop::log::write("show_in_captures %d / unscaled %d changed, re-creating layer",
-                                 local.visual.show_in_captures ? 1 : 0, want_unscaled ? 1 : 0);
+                                 renderer.mode() != want_mode)) {
+            kinestop::log::write("show_in_captures %d / mode %s changed, re-creating layer",
+                                 local.visual.show_in_captures ? 1 : 0, kinestop::layer_mode_name(want_mode));
             layer_down(frame_start, "settings");
             next_vi_retry = 0;
         }
 
         if (want_layer && !renderer.ready() && frame_start >= next_vi_retry) {
             KinestopStage stage = KinestopStage_None;
-            rc = renderer.init(local.visual.show_in_captures, want_unscaled, stage);
+            rc = renderer.init(local.visual.show_in_captures, want_mode, stage);
             z_failed = false;  // a new layer gets its Z from init()
             if (R_FAILED(rc)) {
                 record_error(stage, rc);
@@ -652,12 +676,12 @@ int main(int argc, char* argv[]) {
             } else {
                 layer_inits++;
                 const kinestop::LayerInfo& li = renderer.info();
-                kinestop::log::write("t=%s layer up #%u: %dx%d VI units at 0,0 (fb %ux%u), z %d (min %d max %d), "
-                                     "underscan %d, captures %d, unscaled %d",
-                                     seconds(t_ms).text, (unsigned)layer_inits, (int)li.width, (int)li.height,
-                                     (unsigned)kinestop::Renderer::FB_WIDTH, (unsigned)kinestop::Renderer::FB_HEIGHT,
+                kinestop::log::write("t=%s layer up #%u (%s): %dx%d VI units at 0,0 (fb %ux%u), z %d (min %d max %d), "
+                                     "underscan %d, captures %d",
+                                     seconds(t_ms).text, (unsigned)layer_inits, kinestop::layer_mode_name(li.mode),
+                                     (int)li.width, (int)li.height, (unsigned)li.fb_width, (unsigned)li.fb_height,
                                      (int)li.z, (int)li.z_min, (int)li.z_max, li.underscan ? 1 : 0,
-                                     li.in_captures ? 1 : 0, li.unscaled ? 1 : 0);
+                                     li.in_captures ? 1 : 0);
                 clear_error_if(is_vi_stage);
                 if (R_FAILED(renderer.last_soft_error()))
                     record_error(KinestopStage_LayerStack, renderer.last_soft_error());
@@ -688,16 +712,19 @@ int main(int argc, char* argv[]) {
 
         // --- present --------------------------------------------------------
         if (renderer.ready()) {
+            const float fb_scale = kinestop::frame_scale::fb_scale_for(renderer.fb_width());
             const kinestop::dots::Point offset = kinestop::dots::compute_offset(ori, local);
+            // A layer re-creation (the only way fb_scale changes) clears
+            // have_key, so keys of different scales are never compared.
             const FrameKey key{
                 local_gen,
-                (s32)lroundf(offset.x * FB_SCALE * OFFSET_QUANTUM),
-                (s32)lroundf(offset.y * FB_SCALE * OFFSET_QUANTUM),
+                kinestop::frame_scale::quantize_offset(offset.x, fb_scale),
+                kinestop::frame_scale::quantize_offset(offset.y, fb_scale),
             };
 
             if (!have_key || key != last_key) {
                 static kinestop::DotFrame frame;  // ~0.6 KiB: keep it off the stack
-                build_frame(local, key, frame);
+                build_frame(local, key, fb_scale, frame);
 
                 KinestopStage stage = KinestopStage_None;
                 bool presented = false;
@@ -777,6 +804,9 @@ int main(int argc, char* argv[]) {
     }
 
     kinestop::log::write("shutting down");
+    // Get it onto the SD card now: if the teardown below hangs, the overlay
+    // terminates us 0.5 s after Exit, before the next periodic drain.
+    kinestop::log::flush();
 
     // IPC goes first. Once the IPC thread has replied to Exit it stops
     // serving, so a client's serviceClose() (a synchronous Close request)
@@ -799,5 +829,7 @@ int main(int argc, char* argv[]) {
     // is still registered.
     sensor.exit();
     kinestop::log::write("exited cleanly");
+    // Joins the logger thread, then writes what is still queued.
+    kinestop::log::exit();
     return 0;
 }

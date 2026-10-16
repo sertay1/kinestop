@@ -70,6 +70,24 @@ namespace {
         return stat(path, &st) == 0;
     }
 
+    // KINESTOP_DEBUG_NO_SUSPEND (coexistence test): the overlay never takes
+    // the dots down for its panel or for the Ultrahand menu.
+    inline bool no_suspend_test() {
+        return (g_config.general.debug_flags & (int)KINESTOP_DEBUG_NO_SUSPEND) != 0;
+    }
+
+    // Name of the layer the sysmodule builds for the current debug_flags
+    // (UNSCALED_LAYER wins over SCALED_SMALL, see kinestop_ipc.h).
+    const char* layer_mode_name() {
+        const bool tr = g_config.general.language == 1;
+        const int dbg = g_config.general.debug_flags;
+        if (dbg & (int)KINESTOP_DEBUG_UNSCALED_LAYER)
+            return tr ? "Çeyrek 1x (640x360)" : "Quarter 1x (640x360)";
+        if (dbg & (int)KINESTOP_DEBUG_SCALED_SMALL)
+            return tr ? "Çeyrek 2x (320x180)" : "Quarter 2x (320x180)";
+        return tr ? "Tam ekran 2x (640x360)" : "Full screen 2x (640x360)";
+    }
+
     // ---------------------------------------------------------------------
     // CONFIG PERSISTENCE
     // The overlay is the only writer of config.ini. Trackbar drags fire one
@@ -115,6 +133,7 @@ namespace {
     std::atomic<bool> g_workerActive{false};
     Job               g_job          = Job::None;
     Result            g_jobRc        = 0;
+    bool              g_jobNoSuspend = false;  // no_suspend_test() when the job was queued
     std::atomic<bool> g_jobDone{false};
 
     Job    g_lastJob   = Job::None;  // outcome shown in the status line
@@ -134,7 +153,7 @@ namespace {
             // The new process starts unsuspended and puts its layer up next
             // to this panel's: take it down again at once. onHide joins the
             // worker before resuming, so this cannot outlive the panel.
-            if (R_SUCCEEDED(g_jobRc) && g_panelVisible.load(std::memory_order_acquire))
+            if (R_SUCCEEDED(g_jobRc) && !g_jobNoSuspend && g_panelVisible.load(std::memory_order_acquire))
                 ipc::setSuspended(true);
         } else {
             g_jobRc = ipc::stop();
@@ -171,7 +190,7 @@ namespace {
 
     // Diagnostics block (test builds): re-formatted on each status refresh
     // (~1 Hz), drawn as-is every frame.
-    constexpr int DiagMaxLines   = 6;
+    constexpr int DiagMaxLines   = 7;
     constexpr u16 DiagLineStep   = 17;
     constexpr u32 DiagFontSize   = 14;
     constexpr u16 DiagBlockHeight = DiagMaxLines * DiagLineStep + 12;
@@ -250,6 +269,10 @@ namespace {
         const bool tr = is_tr();
         g_diagCount = 0;
 
+        // From the settings pushed to the sysmodule, so shown even without data.
+        add_diag_line(ColorIdle, tr ? "Katman: %s%s" : "Layer: %s%s", layer_mode_name(),
+                      no_suspend_test() ? (tr ? ", duraklatma yok" : ", no suspend") : "");
+
         if (st == nullptr) {
             g_diagPrevValid = false;
             add_diag_line(ColorIdle, tr ? "Tanılama: veri yok" : "Diagnostics: no data");
@@ -299,7 +322,7 @@ namespace {
             std::snprintf(ack, sizeof(ack), " (%d ms)", (int)g_suspendAckMs);
         else if (g_suspendAckMs == SuspendAckTimeout)
             std::snprintf(ack, sizeof(ack), "%s", tr ? " (onay yok)" : " (no ack)");
-        const bool expectSuspended = g_panelVisible.load(std::memory_order_relaxed);
+        const bool expectSuspended = g_panelVisible.load(std::memory_order_relaxed) && !no_suspend_test();
         add_diag_line((suspended != expectSuspended || g_suspendAckMs == SuspendAckTimeout) ? ColorWarn : ColorIdle,
                       tr ? "Katman kurulumu %u | Askıda: %s%s" : "Layer inits %u | Suspended: %s%s",
                       (unsigned)st->layer_inits,
@@ -417,8 +440,10 @@ namespace {
         update_diagnostics(have ? &st : nullptr);
 
         // Panel on screen but the layer is up (sysmodule started from
-        // elsewhere, or a lost SetSuspended): ask again.
-        if (have && g_panelVisible.load(std::memory_order_relaxed) && !(st.flags & KINESTOP_STATUS_SUSPENDED))
+        // elsewhere, or a lost SetSuspended): ask again. Not in the
+        // coexistence test, where the layer is meant to stay up.
+        if (have && g_panelVisible.load(std::memory_order_relaxed) && !no_suspend_test() &&
+            !(st.flags & KINESTOP_STATUS_SUSPENDED))
             ipc::setSuspended(true);
     }
 
@@ -436,8 +461,14 @@ namespace {
     // waitForLayerDown, polls its status for up to SuspendWaitNs until it
     // reports the layer gone, so this panel's layer does not have to share
     // the display with ours; the time it took is shown in the diagnostics.
+    // In the coexistence test (KINESTOP_DEBUG_NO_SUSPEND) every suspend
+    // request becomes a resume, so dots left suspended earlier come back.
     void suspend_dots(bool suspend, bool waitForLayerDown) {
         CtlLock lock(g_ctlMutex);
+        if (suspend && no_suspend_test()) {
+            suspend = false;
+            g_suspendAckMs = SuspendAckNone;
+        }
         if (worker_busy() || !ipc::isRunning())
             return;
         if (R_FAILED(ipc::setSuspended(suspend)) || !suspend || !waitForLayerDown)
@@ -479,6 +510,12 @@ namespace {
             if (ipc::isRunning()) {
                 // Push in case settings changed while it was starting.
                 push_config();
+                // The worker suspended (or not) per the coexistence-test
+                // flag as it was when the job was queued; match the flag as
+                // it is now (suspend_dots turns this into a resume when the
+                // test is on).
+                if (g_panelVisible.load(std::memory_order_acquire))
+                    suspend_dots(true, false);
             } else if (g_config.general.enabled) {
                 // Did not come up: don't leave "enabled" claiming otherwise.
                 g_config.general.enabled = false;
@@ -493,6 +530,7 @@ namespace {
         if (g_workerActive) return;
 
         g_job = job;
+        g_jobNoSuspend = no_suspend_test();
         g_lastJob = Job::None;
         g_lastJobRc = 0;
         g_jobDone.store(false, std::memory_order_relaxed);
@@ -509,6 +547,30 @@ namespace {
         // Could not spawn a thread: do it inline (the panel stalls briefly).
         worker_main(nullptr);
         on_job_finished();  // join_worker() is a no-op: no thread is active
+    }
+
+    // Static orange note lines under a list item. `en`/`tr` hold up to
+    // NoteMaxLines lines each (nullptr-terminated when shorter); the NoteText
+    // must outlive the list (static storage).
+    constexpr int NoteMaxLines = 6;
+    constexpr s32 NoteLineStep = 20;
+
+    struct NoteText { const char* en[NoteMaxLines]; const char* tr[NoteMaxLines]; };
+
+    int note_line_count(const char* const* lines) {
+        int n = 0;
+        while (n < NoteMaxLines && lines[n] != nullptr) ++n;
+        return n;
+    }
+
+    void add_note(tsl::elm::List* list, const NoteText& text, bool tr) {
+        const char* const* lines = tr ? text.tr : text.en;
+        const int count = note_line_count(lines);
+        list->addItem(new tsl::elm::CustomDrawer([lines, count](tsl::gfx::Renderer *renderer, s32 x, s32 y, s32 w, s32 h) {
+            const tsl::Color color = make_color(255, 170, 50);
+            for (int i = 0; i < count; ++i)
+                renderer->drawString(lines[i], false, x + 19, y + 20 + i * NoteLineStep, 15, color);
+        }), (u16)(count * NoteLineStep + 12));
     }
 
     // Per-frame housekeeping shared by every Gui. Cheap unless a refresh is
@@ -640,7 +702,9 @@ public:
             add_body("yeniden görünürler. B ile çıkarsanız");
             add_body("(Ultrahand menüsüne dönüş) duraklatılmış");
             add_body("kalırlar, böylece menü görünür kalır");
-            add_body("(deneme sürümü).");
+            add_body("(deneme sürümü). Geri getirmek için");
+            add_body("Kinestop'u tekrar açıp kombinasyonla");
+            add_body("gizleyin.");
 
             add_header("GELİŞTİRİCİ VE BAĞIŞ LİNKLERİ", make_color(80, 200, 255));
             add_body("Geliştirici: SertAy");
@@ -744,7 +808,9 @@ public:
             add_body("and come back when you hide it with the");
             add_body("launch combo. Leaving with B (back to the");
             add_body("Ultrahand menu) keeps them paused so that");
-            add_body("menu stays visible (test build).");
+            add_body("menu stays visible (test build). To bring");
+            add_body("them back, open Kinestop again and hide it");
+            add_body("with the combo.");
 
             add_header("CREATOR & DONATION LINKS", make_color(80, 200, 255));
             add_body("Developer: SertAy");
@@ -962,6 +1028,37 @@ public:
             start_job(newState ? Job::Start : Job::Stop);
         });
         list->addItem(m_toggleEnabled);
+
+        // How the dots pause around this panel. Read live: the coexistence
+        // test toggle further down changes it.
+        list->addItem(new tsl::elm::CustomDrawer([isTr](tsl::gfx::Renderer *renderer, s32 x, s32 y, s32 w, s32 h) {
+            static constexpr const char* pausedEn[] = {
+                "Dots pause while this panel is open;",
+                "hide it with the combo to resume them.",
+                "After B they stay paused until you open",
+                "Kinestop again and hide it with the combo.",
+            };
+            static constexpr const char* pausedTr[] = {
+                "Panel açıkken noktalar duraklatılır;",
+                "devam için paneli kombinasyonla gizleyin.",
+                "B ile çıkarsanız, Kinestop'u tekrar açıp",
+                "kombinasyonla gizleyene dek duraklar.",
+            };
+            static constexpr const char* testEn[] = {
+                "Coexistence test on: the dots are not",
+                "paused for this panel or other menus.",
+            };
+            static constexpr const char* testTr[] = {
+                "Uyumluluk testi açık: noktalar bu panel",
+                "ve diğer menüler için duraklatılmaz.",
+            };
+            const bool test = no_suspend_test();
+            const char* const* lines = test ? (isTr ? testTr : testEn) : (isTr ? pausedTr : pausedEn);
+            const int count = test ? 2 : 4;
+            const tsl::Color note = make_color(255, 170, 50);
+            for (int i = 0; i < count; ++i)
+                renderer->drawString(lines[i], false, x + 19, y + 20 + i * NoteLineStep, 15, note);
+        }), 4 * NoteLineStep + 12);
 
         // Diagnostics block (test build): lines are re-formatted by
         // refresh_status() about once per second.
@@ -1214,13 +1311,62 @@ public:
         // ------------------ DIAGNOSTICS (TEST BUILD) ------------------
         list->addItem(new tsl::elm::CategoryHeader(isTr ? "Tanılama (test sürümü)" : "Diagnostics (test build)"));
 
-        struct DebugToggle { const char* en; const char* tr; u32 bit; };
+        // Each toggle is followed by a note saying what it does. The two
+        // layer toggles pick one of three layer modes; both off is the
+        // normal full-screen layer.
+        struct DebugToggle { const char* en; const char* tr; u32 bit; NoteText intro; NoteText note; };
         static constexpr DebugToggle debugToggles[] = {
-            { "Blink test",          "Yanıp sönme testi",          KINESTOP_DEBUG_BLINK_TEST },
-            { "Unscaled test layer", "Ölçeklenmemiş test katmanı", KINESTOP_DEBUG_UNSCALED_LAYER },
-            { "Verbose log",         "Ayrıntılı günlük",           KINESTOP_DEBUG_VERBOSE_LOG },
+            { "Blink test", "Yanıp sönme testi", KINESTOP_DEBUG_BLINK_TEST, {}, {
+                { "Dots off 3 s out of every 10 s.", nullptr },
+                { "Noktalar her 10 sn'de 3 sn kapanır.", nullptr },
+            } },
+            { "Unscaled test layer", "Ölçeklenmemiş test katmanı", KINESTOP_DEBUG_UNSCALED_LAYER, {
+                { "Layer mode. With both toggles below off:",
+                  "full screen 2x (default), the 640x360",
+                  "image scaled 2x to fill the screen.", nullptr },
+                { "Katman modu. Alttaki iki ayar kapalıysa:",
+                  "tam ekran 2x (varsayılan), 640x360",
+                  "görüntü 2 kat büyütülüp ekranı doldurur.", nullptr },
+            }, {
+                { "Quarter 1x: 640x360 image at 1:1 in the",
+                  "top-left quarter (pattern at half size).", nullptr },
+                { "Çeyrek 1x: 640x360 görüntü 1:1 boyutta",
+                  "sol üst çeyrekte (tüm desen, yarı boyut).", nullptr },
+            } },
+            { "Small 2x-scaled test layer", "Küçük 2x ölçekli test katmanı", KINESTOP_DEBUG_SCALED_SMALL, {}, {
+                { "Quarter 2x: a 320x180 image scaled 2x",
+                  "into the top-left quarter. If both layer",
+                  "toggles are on, the unscaled one wins.", nullptr },
+                { "Çeyrek 2x: 320x180 görüntü 2 kat",
+                  "büyütülüp sol üst çeyreğe çizilir. İki",
+                  "katman ayarı da açıksa ölçeklenmemiş",
+                  "katman geçerli olur.", nullptr },
+            } },
+            { "Verbose log", "Ayrıntılı günlük", KINESTOP_DEBUG_VERBOSE_LOG, {}, {
+                { "1 line per second in sysmodule.log;",
+                  "each SD write may cause a small hitch.", nullptr },
+                { "sysmodule.log'a saniyede 1 satır yazar;",
+                  "her SD yazımı küçük takılma yapabilir.", nullptr },
+            } },
+            { "Keep dots while menus open (coexistence test)",
+              "Menüler açıkken noktaları göster (uyumluluk testi)", KINESTOP_DEBUG_NO_SUSPEND, {}, {
+                { "Dots stay on while this panel and the",
+                  "Ultrahand menu are open. If a menu is",
+                  "gone for more than a few seconds, reboot.",
+                  "This stays on after a reboot: turn it",
+                  "off before starting the dots, or set",
+                  "debug_flags=4 in config.ini from a PC." },
+                { "Bu panel ve Ultrahand menüsü açıkken",
+                  "noktalar ekranda kalır. Menü birkaç",
+                  "saniyede geri gelmezse yeniden başlatın.",
+                  "Bu ayar yeniden başlatınca da açık kalır:",
+                  "noktaları başlatmadan önce kapatın ya da",
+                  "PC'den config.ini'de debug_flags=4 yapın." },
+            } },
         };
         for (const auto& dt : debugToggles) {
+            if (dt.intro.en[0] != nullptr)
+                add_note(list, dt.intro, isTr);
             auto *toggle = new tsl::elm::ToggleListItem(isTr ? dt.tr : dt.en,
                                                         (g_config.general.debug_flags & dt.bit) != 0);
             const u32 bit = dt.bit;
@@ -1232,25 +1378,16 @@ public:
                 g_config.sanitize();
                 save_config_now();
                 push_config();
+                // Coexistence test: takes effect at once, with this panel
+                // still on screen. On: resume the dots (the experiment).
+                // Off: suspend them again like a normal open panel.
+                if (bit == KINESTOP_DEBUG_NO_SUSPEND)
+                    suspend_dots(!newState, !newState);
+                g_refreshNow = true;
             });
             list->addItem(toggle);
+            add_note(list, dt.note, isTr);
         }
-
-        list->addItem(new tsl::elm::CustomDrawer([isTr](tsl::gfx::Renderer *renderer, s32 x, s32 y, s32 w, s32 h) {
-            const tsl::Color note = make_color(255, 170, 50);
-            renderer->drawString(isTr ? "Yanıp sönme: her 10 sn'de 3 sn kapalı." : "Blink: dots off 3 s out of every 10 s.",
-                                 false, x + 19, y + 20, 15, note);
-            renderer->drawString(isTr ? "Ölçeksiz: 1:1 katman, sol üst çeyrek." : "Unscaled: 1:1 layer, top-left quarter.",
-                                 false, x + 19, y + 40, 15, note);
-            renderer->drawString(isTr ? "Günlük: sysmodule.log'a saniyede 1 satır." : "Log: 1 line per second in sysmodule.log.",
-                                 false, x + 19, y + 60, 15, note);
-            renderer->drawString(isTr ? "Panel açıkken noktalar duraklatılır." : "Dots are paused while this panel is open.",
-                                 false, x + 19, y + 80, 15, note);
-            renderer->drawString(isTr ? "Devam için paneli kombinasyonla gizleyin;" : "Hide it with the combo to resume them;",
-                                 false, x + 19, y + 100, 15, note);
-            renderer->drawString(isTr ? "B ile çıkınca duraklatılmış kalırlar." : "B (back to the menu) keeps them paused.",
-                                 false, x + 19, y + 120, 15, note);
-        }), 132);
 
         // ------------------ GUIDE & MAINTENANCE ------------------
         list->addItem(new tsl::elm::CategoryHeader(isTr ? "Rehber ve Bakım" : "Guide & Maintenance"));
@@ -1321,7 +1458,8 @@ public:
 
     virtual bool handleInput(u64 keysDown, u64 keysHeld, const HidTouchState &touchPos, HidAnalogStickState joyStickPosLeft, HidAnalogStickState joyStickPosRight) override {
         // B closes the panel (back to the Ultrahand menu). The dots stay
-        // suspended (see exitServices); hiding with the combo resumes them.
+        // suspended (see exitServices) until Kinestop is opened again and
+        // hidden with the combo; the note under the master toggle says so.
         if (keysDown & HidNpadButton_B) {
             flush_config();
             tsl::goBack();
@@ -1334,8 +1472,9 @@ public:
 class KinestopOverlay : public tsl::Overlay {
 public:
     // While this panel is on screen the sysmodule takes its own VI layer
-    // down (test build v2.0.0-test.2: suspected that the display does not
-    // composite this panel's layer while ours exists). initServices() runs
+    // down (test.2 showed the panel and the Ultrahand menu stay visible that
+    // way). The KINESTOP_DEBUG_NO_SUSPEND coexistence test turns every
+    // suspend into a resume (suspend_dots). initServices() runs
     // before libtesla creates its layer (initScreen), exitServices() after
     // it is destroyed (exitScreen). onShow() runs on the main loop thread;
     // onHide() also from Ultrahand's background event thread, hence the lock.
@@ -1352,7 +1491,9 @@ public:
     // just as that overlay's layer appears, i.e. symptom (A) for the menu
     // itself. So the dots stay suspended (and are suspended again if the
     // panel was hidden); they resume when this panel is hidden with the
-    // combo (onHide), or when the sysmodule is restarted.
+    // combo (onHide), or when the sysmodule is restarted. Closing the
+    // Ultrahand menu afterwards cannot be detected from here, so the panel
+    // and the guide tell the user to reopen Kinestop and hide it instead.
     virtual void exitServices() override {
         CtlLock lock(g_ctlMutex);
         g_panelVisible.store(false, std::memory_order_release);

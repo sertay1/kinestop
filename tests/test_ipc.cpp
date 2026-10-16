@@ -152,11 +152,16 @@ void test_constants() {
     CHECK_EQ(KinestopSensor_SevenSixAxis, 1);
     CHECK_EQ(KinestopSensor_NpadSixAxis, 2);
 
-    // debug_flags: three distinct bits, all fitting the u8 wire field.
+    // debug_flags: five distinct bits, KINESTOP_DEBUG_ALL is exactly their
+    // union, all fitting the u8 wire field (no API bump: same struct).
     CHECK_EQ(KINESTOP_DEBUG_BLINK_TEST, 1u);
     CHECK_EQ(KINESTOP_DEBUG_UNSCALED_LAYER, 2u);
     CHECK_EQ(KINESTOP_DEBUG_VERBOSE_LOG, 4u);
-    CHECK((KINESTOP_DEBUG_BLINK_TEST | KINESTOP_DEBUG_UNSCALED_LAYER | KINESTOP_DEBUG_VERBOSE_LOG) <= 0xFFu);
+    CHECK_EQ(KINESTOP_DEBUG_NO_SUSPEND, 8u);
+    CHECK_EQ(KINESTOP_DEBUG_SCALED_SMALL, 16u);
+    CHECK_EQ(KINESTOP_DEBUG_ALL, (KINESTOP_DEBUG_BLINK_TEST | KINESTOP_DEBUG_UNSCALED_LAYER | KINESTOP_DEBUG_VERBOSE_LOG |
+                                  KINESTOP_DEBUG_NO_SUSPEND | KINESTOP_DEBUG_SCALED_SMALL));
+    CHECK(KINESTOP_DEBUG_ALL <= 0xFFu);
 
     // SM names are at most 8 bytes.
     const size_t name_len = std::strlen(KINESTOP_SERVICE_NAME);

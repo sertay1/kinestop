@@ -22,16 +22,20 @@ namespace swz = kinestop::swizzle;
 namespace {
 
 constexpr uint32_t W = 640, H = 360;
+// KINESTOP_DEBUG_SCALED_SMALL framebuffer.
+constexpr uint32_t SW = 320, SH = 180;
 
 struct Buffer {
+    uint32_t w, h;
     std::vector<uint16_t> px;
     raster::Surface surf;
-    Buffer() : px(swz::buffer_size_16bpp(W, H) / 2, 0), surf{px.data(), W, H} {}
+    Buffer(uint32_t w_ = W, uint32_t h_ = H)
+        : w(w_), h(h_), px(swz::buffer_size_16bpp(w_, h_) / 2, 0), surf{px.data(), w_, h_} {}
     bool all_zero() const {
         for (uint16_t v : px) if (v) return false;
         return true;
     }
-    uint16_t at(uint32_t x, uint32_t y) const { return px[swz::pixel_offset_16bpp(x, y, W)]; }
+    uint16_t at(uint32_t x, uint32_t y) const { return px[swz::pixel_offset_16bpp(x, y, w)]; }
 };
 
 raster::DotStyle style(float radius, uint8_t alpha) {
@@ -111,6 +115,40 @@ void test_not_clipped() {
     CHECK(ok);
 }
 
+// The 320x180 surface: same containment / padding / clear guarantees, with
+// the radii the sysmodule uses at fb_scale 0.25 (min core 0.5 px, ring 1 px).
+void test_small_surface() {
+    const float xs[] = {-10.0f, 0.0f, 0.3f, 8.125f, 160.0f, 314.6f, 319.5f, 320.0f, 330.0f};
+    const float ys[] = {-10.0f, 0.0f, 0.7f, 8.0f, 90.25f, 175.0f, 179.5f, 180.0f, 190.0f};
+    const float radii[] = {0.5f, 0.75f, 1.5f, 2.75f};
+
+    bool contained = true, padding_clean = true, cleared = true, drew = false;
+    for (float r : radii)
+        for (float cx : xs)
+            for (float cy : ys) {
+                Buffer b(SW, SH);
+                const raster::Rect rect = raster::draw_dot(b.surf, cx, cy, style(r, 204));
+                if (!b.all_zero()) drew = true;
+                for (uint32_t y = 0; y < SH; ++y)
+                    for (uint32_t x = 0; x < SW; ++x)
+                        if (b.at(x, y) && !inside(rect, x, y)) contained = false;
+                for (uint32_t y = SH; y < swz::aligned_height(SH); ++y)
+                    for (uint32_t x = 0; x < SW; ++x)
+                        if (b.at(x, y)) padding_clean = false;
+                raster::clear_rect(b.surf, rect);
+                if (!b.all_zero()) cleared = false;
+            }
+    CHECK(contained);
+    CHECK(padding_clean);
+    CHECK(cleared);
+    CHECK(drew);
+
+    // A dot at the right edge lands in the last GOB column of a 320 px row.
+    Buffer e(SW, SH);
+    raster::draw_dot(e.surf, 318.5f, 100.5f, style(1.0f, 255));
+    CHECK((e.at(318, 100) >> 12) == 15);
+}
+
 void test_pixels() {
     Buffer b;
     const raster::DotStyle st = style(3.0f, 255);
@@ -157,6 +195,7 @@ void test_pixels() {
 int main() {
     test_bounds_and_clear();
     test_not_clipped();
+    test_small_surface();
     test_pixels();
     return check::summary("raster");
 }

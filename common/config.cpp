@@ -138,10 +138,10 @@ void Config::set_defaults() {
 void Config::sanitize() {
     general.poll_rate_hz = clampi(general.poll_rate_hz, 10, 120);
     general.language = clampi(general.language, 0, 1);
-    // 0..7: unknown bits are dropped rather than clamped (each bit is its own
+    // KINESTOP_DEBUG_ALL: unknown bits are dropped rather than clamped (each bit is its own
     // switch); a negative value is treated as "none", not as "all bits".
     general.debug_flags = general.debug_flags < 0 ? 0
-        : general.debug_flags & (int)(KINESTOP_DEBUG_BLINK_TEST | KINESTOP_DEBUG_UNSCALED_LAYER | KINESTOP_DEBUG_VERBOSE_LOG);
+        : general.debug_flags & (int)KINESTOP_DEBUG_ALL;
 
     // Unknown styles fall back to Perimeter (0), as the original
     // get_anchors() did with `default: case 0:`.

@@ -3,8 +3,8 @@
 // Original Kinestop by SertAy (https://github.com/sertay1/Kinestop). The
 // sysmodule/overlay split is a modification of the original project: dots
 // used to be drawn by the Tesla overlay itself; now this module owns a VI
-// managed layer the way libtesla does, but with a 640x360 framebuffer that VI
-// scales to the full screen. Buffers are dequeued with a hard deadline so a
+// managed layer the way libtesla does, but with a small framebuffer (640x360
+// normally) that VI scales up to the layer size. Buffers are dequeued with a hard deadline so a
 // compositor that stops releasing them can never stall the main loop.
 
 #pragma once
@@ -35,20 +35,38 @@ struct PresentStats {
     Result last_fence_rc;  // Result of the latest such failure, 0 if none
 };
 
+// Framebuffer size + layer size combinations. Chosen at init(); changing it
+// means re-creating the layer.
+enum class LayerMode : u8 {
+    Full2x,     // 640x360 fb in the full 1920x1080 VI space (2x on the 1280x720 panel)
+    Quarter1x,  // KINESTOP_DEBUG_UNSCALED_LAYER: 640x360 fb in a 960x540 VI-unit layer
+                // at 0,0 (1:1 on the handheld panel; the whole pattern, half size)
+    Quarter2x,  // KINESTOP_DEBUG_SCALED_SMALL: 320x180 fb in a 960x540 VI-unit layer
+                // at 0,0 (2x on the panel, like Full2x; the whole pattern, half size)
+};
+
+const char* layer_mode_name(LayerMode mode);
+
 // What a successful init() set up, for the "layer up" log line.
 struct LayerInfo {
     s32 z_min, z_max;      // viGetZOrderCountMin/Max (-1 if the call failed)
     s32 z;                 // Z actually applied
     s32 width, height;     // layer size in VI units (at 0,0)
     bool underscan;        // docked with TV underscan: Z = UNDERSCAN_Z
+    u32 fb_width, fb_height;  // framebuffer pixels
     bool in_captures;
-    bool unscaled;
+    LayerMode mode;
 };
 
 class Renderer {
 public:
+    // Framebuffer sizes. 640x360 RGBA4444 is 1280 B x 384 rows (height
+    // padded to 128) = 491,520 B per slot; 320x180 is 640 B x 256 rows =
+    // 163,840 B per slot (libnx framebufferCreate() formula, see swizzle.hpp).
     static constexpr u32 FB_WIDTH  = 640;
     static constexpr u32 FB_HEIGHT = 360;
+    static constexpr u32 SMALL_FB_WIDTH  = 320;
+    static constexpr u32 SMALL_FB_HEIGHT = 180;
     static constexpr u32 NUM_FBS   = 2;
 
     // VI coordinate space for a full-screen layer. libtesla uses 1920x1080
@@ -56,11 +74,12 @@ public:
     static constexpr s32 LAYER_WIDTH  = 1920;
     static constexpr s32 LAYER_HEIGHT = 1080;
 
-    // KINESTOP_DEBUG_UNSCALED_LAYER: the same 640x360 framebuffer in a
-    // 960x540 VI-unit layer at (0,0), i.e. 1:1 on the 1280x720 handheld
-    // panel. Only the top-left quarter of the dot pattern is visible.
-    static constexpr s32 UNSCALED_LAYER_WIDTH  = 960;
-    static constexpr s32 UNSCALED_LAYER_HEIGHT = 540;
+    // LayerMode::Quarter1x / Quarter2x: a 960x540 VI-unit layer at (0,0),
+    // the top-left quarter of the screen. The framebuffer still holds the
+    // whole dot pattern (scaled by fb_width / 1280), so the whole pattern
+    // shows there at half size.
+    static constexpr s32 QUARTER_LAYER_WIDTH  = 960;
+    static constexpr s32 QUARTER_LAYER_HEIGHT = 540;
 
     // libtesla drops its own layer to Z=34 while docked with TV underscan
     // active; stay just below it in that case.
@@ -70,7 +89,7 @@ public:
 
     // Creates the layer and framebuffer. On failure everything created so far
     // is torn down again and `stage` names the step that failed.
-    Result init(bool show_in_captures, bool unscaled, KinestopStage& stage);
+    Result init(bool show_in_captures, LayerMode mode, KinestopStage& stage);
 
     // Presents one transparent frame (bounded), then destroys everything:
     // layer, display, vi session and the framebuffers (heap memory).
@@ -78,7 +97,10 @@ public:
 
     bool ready() const { return m_fb_ok; }
     bool in_captures() const { return m_in_captures; }
-    bool unscaled() const { return m_unscaled; }
+    LayerMode mode() const { return m_mode; }
+    // Framebuffer size of the current layer (valid while ready()).
+    u32 fb_width() const { return m_fb_width; }
+    u32 fb_height() const { return m_fb_height; }
     const LayerInfo& info() const { return m_info; }
     const PresentStats& stats() const { return m_stats; }
 
@@ -107,7 +129,8 @@ private:
     bool m_nwin_ok;
     bool m_fb_ok;
     bool m_in_captures;
-    bool m_unscaled;
+    LayerMode m_mode;
+    u32 m_fb_width, m_fb_height;
     bool m_underscan_z;
     s32 m_normal_z;
     Result m_soft_rc;
