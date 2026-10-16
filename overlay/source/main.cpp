@@ -7,14 +7,13 @@
  * by its launch arguments in main() (the same relaunch-per-mode pattern
  * Status Monitor uses):
  *
- *   SETTINGS (default): the normal 448x720 settings panel. Leaving it (B, or
- *     a hide: menu combo, HOME, power) with the dots enabled relaunches
- *     kinestop.ovl in HUD mode; B with the dots disabled goes back to the
- *     Ultrahand menu.
+ *   SETTINGS (default): the normal 448x720 settings panel. Its first item,
+ *     "Motion Dots", relaunches kinestop.ovl in HUD mode; B goes back to the
+ *     Ultrahand menu and the menu combo hides it, as in any Tesla overlay.
  *   HUD ("-hud"): a 640x360 framebuffer that VI scales up to a full-screen
  *     layer (Kinestop patch in libtesla). It draws only the dots, gives every
- *     button to the game and is never hidden; the menu combo relaunches
- *     kinestop.ovl in SETTINGS mode.
+ *     button to the game and is never hidden; the menu combo stops the dots
+ *     and relaunches kinestop.ovl in SETTINGS mode.
  *
  * The original kept a 1280x720 framebuffer and needed 8 MB of overlay memory.
  */
@@ -39,7 +38,6 @@
 namespace {
     namespace dots = kinestop::dots;
 
-    constexpr const char* HudModeLabel = "Motion Dots";  // its name in Ultrahand's "Launch modes"
     constexpr u16 HudFramebufferWidth  = 640;           // scaled 2x (handheld) / 3x (docked) to full screen
     constexpr u16 HudFramebufferHeight = 360;
 
@@ -80,25 +78,25 @@ namespace {
     // Each mode is its own launch of kinestop.ovl: the next launch is queued
     // with setNextOverlay() and this process exits.
     // ---------------------------------------------------------------------
-    void queue_relaunch(bool hud) {
+    // From the main (UI) thread.
+    void relaunch(bool hud) {
         // A mode switch is not an exit: no exit rumble/sound on the way out,
         // and the HUD comes up silently.
         skipClosingExitFeedback = true;
         tsl::setNextOverlay(ult::OVERLAY_PATH + g_selfName, hud ? std::string(kinestop::hud::HUD_ARG) + " --silentLaunch" : "");
-    }
-
-    // From the main (UI) thread.
-    void relaunch(bool hud) {
-        queue_relaunch(hud);
         tsl::Overlay::get()->close(true);
     }
 
-    // Closes Kinestop into the Ultrahand menu, also when this session was
-    // started by a key combo (which clears Ultrahand's in_overlay flag): the
-    // same in_overlay + --skipCombo return libtesla does for combo returns.
-    void open_ultrahand_menu() {
+    // B in the settings: closes Kinestop into the Ultrahand menu, as Status
+    // Monitor's menu does after a combo return. A plain close only shows
+    // ovlmenu when Ultrahand's in_overlay flag is still set, and a --direct
+    // launch (a launch-mode combo, libtesla's combo return to our own menu)
+    // clears it, so it is set here and ovlmenu is launched directly, with its
+    // cursor on our row; ovlmenu plays the exit feedback.
+    void return_to_ultrahand_menu() {
         ult::setIniFileValue(ult::ULTRAHAND_CONFIG_INI_PATH, ult::ULTRAHAND_PROJECT_NAME, ult::IN_OVERLAY_STR, ult::TRUE_STR);
-        tsl::setNextOverlay(returnOverlayPath, "--skipCombo");
+        tsl::setNextOverlay(returnOverlayPath, "--direct --comboReturnFrom " + g_selfName);
+        skipClosingExitFeedback = true;
         tsl::Overlay::get()->close(true);
     }
 
@@ -212,11 +210,14 @@ namespace {
         g_noticeUntilNs = now_ns() + NoticeNs;
     }
 
-    // Per-frame housekeeping of the settings Guis.
+    // Per-frame housekeeping of the settings Guis. A hide (menu combo, HOME,
+    // power, touch outside) is a normal Tesla hide; libtesla still runs
+    // update() during its fade-out, so a pending trackbar change is written
+    // then instead of waiting for the panel to come back.
     void tick_settings() {
         sensor_tick();
         const u64 now = now_ns();
-        if (g_saveDirty && now - g_saveDirtyNs >= SaveDebounceNs)
+        if (g_saveDirty && (now - g_saveDirtyNs >= SaveDebounceNs || ult::isHidden.load(std::memory_order_acquire)))
             save_config_now();
         if (g_noticeUntilNs != 0 && now >= g_noticeUntilNs) {
             g_noticeUntilNs = 0;
@@ -233,14 +234,19 @@ namespace {
     }
 
     // Lets Ultrahand assign a key combo to the HUD mode ("Launch modes" in
-    // the overlay's settings), as Status Monitor does. Written only when
-    // missing or different, so the SD card is not touched on every launch.
+    // the overlay's settings), as Status Monitor does. The label is the
+    // menu's launch item in the current language (Ultrahand keeps mode
+    // combos by position, so relabelling keeps them). Nothing depends on
+    // matching it: the --lastSelectedItem <label> that libtesla adds on a
+    // combo return is ignored, because the launch item is the menu's first
+    // item and so gets the initial focus anyway. Written only when missing
+    // or different, so the SD card is not touched on every launch.
     // overlays.ini itself is Ultrahand's: left alone when it does not exist.
     void register_launch_modes() {
         if (!ult::isFile(ult::OVERLAYS_INI_FILEPATH))
             return;
         const std::string args   = std::string("(") + kinestop::hud::HUD_ARG + ")";
-        const std::string labels = std::string("(") + HudModeLabel + ")";
+        const std::string labels = std::string("(") + kinestop::hud::mode_label(g_config.general.language) + ")";
         if (ult::parseValueFromIniSection(ult::OVERLAYS_INI_FILEPATH, g_selfName, "mode_args") != args)
             ult::setIniFileValue(ult::OVERLAYS_INI_FILEPATH, g_selfName, "mode_args", args);
         if (ult::parseValueFromIniSection(ult::OVERLAYS_INI_FILEPATH, g_selfName, "mode_labels") != labels)
@@ -257,6 +263,9 @@ namespace {
                 renderer->drawString(lines[i], false, x + 19, y + 20 + i * NoteLineStep, 15, color);
         }), (u16)(count * NoteLineStep + 12));
     }
+
+    // HUD mode: the menu combo, pressed and not yet released.
+    kinestop::hud::ComboRelease g_comboReturn;
 
     // Draws the dots for the current orientation into libtesla's current
     // framebuffer (cleared by the caller): same premultiplied RGBA4444,
@@ -295,7 +304,8 @@ public:
 
     virtual void draw(tsl::gfx::Renderer *renderer) override {
         renderer->clearScreen();
-        if (g_config.general.enabled)
+        // The dots stop as soon as the menu combo is pressed.
+        if (!g_comboReturn.armed)
             draw_hud_dots(renderer, m_frame);
     }
 };
@@ -307,21 +317,15 @@ public:
     }
 
     virtual void update() override {
-        // Launched with the dots turned off (Ultrahand's "Motion Dots"
-        // launch mode or its combo): open the settings instead.
-        if (!g_config.general.enabled) {
-            relaunch(false);
-            return;
-        }
         sensor_tick();
     }
 
     virtual bool handleInput(u64 keysDown, u64 keysHeld, const HidTouchState &touchPos, HidAnalogStickState joyStickPosLeft, HidAnalogStickState joyStickPosRight) override {
         // With tsl::disableHiding libtesla ignores the menu combo while we
-        // are shown: it opens the settings here instead. (Another overlay's
-        // combo still works: libtesla's poller launches it directly.)
-        const u64 combo = tsl::cfg::launchCombo;
-        if ((keysHeld & combo) == combo && (keysDown & combo)) {
+        // are shown: it opens the settings here instead, once the combo is
+        // released (see ComboRelease). (Another overlay's combo still works:
+        // libtesla's poller launches it directly.)
+        if (g_comboReturn.update(keysDown, keysHeld, tsl::cfg::launchCombo)) {
             relaunch(false);
             return true;
         }
@@ -417,23 +421,24 @@ public:
         if (g_config.general.language == 1) {
             // ==================== TÜRKÇE REHBER ====================
             add_header("NASIL ÇALIŞIR?", make_color(80, 240, 120));
-            add_body("Bu panelde ayarlar bulunur. B tuşu veya");
-            add_body("menü kombinasyonuyla çıktığınızda");
-            add_body("noktalar başlar: oyun oynarken ekranda");
-            add_body("görünürler ve tüm tuşlar oyunda kalır.");
-            add_body("Buraya dönmek için menü kombinasyonuna");
-            add_body("yeniden basın. Noktalar kapalıyken B,");
-            add_body("Ultrahand menüsüne döner.");
+            add_body("Bu panelde ayarlar bulunur. Hareket");
+            add_body("Noktaları'nı seçince panel hemen kapanır");
+            add_body("ve noktalar başlar: oyun oynarken");
+            add_body("ekranda görünürler ve tüm tuşlar oyunda");
+            add_body("kalır. Ultrahand kombinasyonu noktaları");
+            add_body("durdurup bu menüyü açar. B, Kinestop'tan");
+            add_body("çıkıp Ultrahand menüsüne döner.");
             add_body("Aynı anda yalnızca bir Tesla overlay'i");
             add_body("çalışabilir: başka bir overlay'i (veya");
             add_body("Ultrahand menüsünü) açmak noktaları");
             add_body("durdurur. Geri getirmek için Kinestop'u");
-            add_body("yeniden açıp B'ye basın. Noktalar");
-            add_body("açıkken Ultrahand menüsüne gitmek için");
-            add_body("Rehber ve Bakım altındaki Ultrahand");
-            add_body("Menüsü seçeneğini kullanın.");
+            add_body("açıp Hareket Noktaları'nı seçin.");
             add_body("Bu panel açıkken noktalar görünmez:");
-            add_body("değişiklikleri görmek için B'ye basın.");
+            add_body("değişiklikleri görmek için Hareket");
+            add_body("Noktaları'nı seçin.");
+            add_body("Ultrahand'de Kinestop'un ayarlarındaki");
+            add_body("başlatma modlarından Hareket Noktaları'na");
+            add_body("ayrı bir tuş kombinasyonu atanabilir.");
             add_body("Ultrahand'in varsayılan 4 MB overlay");
             add_body("belleği yeterlidir.");
 
@@ -462,10 +467,11 @@ public:
 
             add_header("AYARLAR VE ÖZELLİKLER", make_color(80, 200, 255));
 
-            add_sub("Hareket Noktalarını Aç:", make_color(255, 210, 60));
-            add_body("Açıkken bu paneli kapatınca noktalar");
-            add_body("başlar. Kapalıyken B, Ultrahand");
-            add_body("menüsüne döner.");
+            add_sub("Hareket Noktaları:", make_color(255, 210, 60));
+            add_body("Bu paneli kapatıp noktaları başlatır;");
+            add_body("tüm tuşlar oyunda kalır. Ultrahand");
+            add_body("kombinasyonu noktaları durdurur ve bu");
+            add_body("menüyü yeniden açar.");
 
             add_sub("Konsol Hareket Sensörü:", make_color(255, 210, 60));
             add_body("Konsolun kendi hareket sensörünü de");
@@ -531,21 +537,23 @@ public:
         } else {
             // ==================== ENGLISH GUIDE ====================
             add_header("HOW IT WORKS", make_color(80, 240, 120));
-            add_body("This panel holds the settings. Leave it");
-            add_body("with B or the menu combo and the dots");
-            add_body("start: they stay on screen while you play,");
-            add_body("and the game keeps every button. Press");
-            add_body("the menu combo again to come back here.");
-            add_body("With the dots off, B returns to the");
-            add_body("Ultrahand menu.");
+            add_body("This panel holds the settings. Select");
+            add_body("Motion Dots and the panel closes at once");
+            add_body("and the dots start: they stay on screen");
+            add_body("while you play, and the game keeps every");
+            add_body("button. The Ultrahand combo stops the");
+            add_body("dots and opens this menu. B leaves");
+            add_body("Kinestop for the Ultrahand menu.");
             add_body("Only one Tesla overlay runs at a time:");
             add_body("opening another overlay (or the Ultrahand");
-            add_body("menu) stops the dots. Open Kinestop again");
-            add_body("and press B to bring them back. With");
-            add_body("the dots on, use Ultrahand Menu (under");
-            add_body("Guide & Maintenance) to get there.");
+            add_body("menu) stops the dots. Open Kinestop and");
+            add_body("select Motion Dots to bring them back.");
             add_body("The dots are not shown while this panel");
-            add_body("is open: press B to see your changes.");
+            add_body("is open: select Motion Dots to see your");
+            add_body("changes.");
+            add_body("In Ultrahand, Motion Dots can get its own");
+            add_body("key combo (launch modes in Kinestop's");
+            add_body("overlay settings).");
             add_body("Ultrahand's default 4 MB overlay memory");
             add_body("is enough.");
 
@@ -573,10 +581,11 @@ public:
 
             add_header("SETTINGS EXPLAINED", make_color(80, 200, 255));
 
-            add_sub("Enable Motion Dots:", make_color(255, 210, 60));
-            add_body("When on, leaving this panel starts the");
-            add_body("dots. When off, B returns to the");
-            add_body("Ultrahand menu.");
+            add_sub("Motion Dots:", make_color(255, 210, 60));
+            add_body("Closes this panel and starts the dots;");
+            add_body("the game keeps every button. The");
+            add_body("Ultrahand combo stops them and opens");
+            add_body("this menu again.");
 
             add_sub("Console Motion Sensor:", make_color(255, 210, 60));
             add_body("Also reads the console's own motion");
@@ -746,25 +755,32 @@ public:
         // ------------------ MASTER CONTROL ------------------
         list->addItem(new tsl::elm::CategoryHeader(isTr ? "Ana Kontrol" : "Master Control"));
 
-        auto *toggleEnabled = new tsl::elm::ToggleListItem(isTr ? "Hareket Noktalarını Aç" : "Enable Motion Dots",
-                                                           g_config.general.enabled);
-        toggleEnabled->setStateChangedListener([](bool newState) {
-            g_config.general.enabled = newState;
-            save_config_now();
+        // Launch item, like Status Monitor's modes: closes this panel at
+        // once and starts the dots over the game. It is the first item, so
+        // the cursor starts on it, also when the menu combo brings the
+        // panel back from the dots.
+        auto *launchDots = new tsl::elm::ListItem(kinestop::hud::mode_label(g_config.general.language));
+        launchDots->setClickListener([](u64 keys) {
+            if (keys & HidNpadButton_A) {
+                flush_config();
+                relaunch(true);
+                return true;
+            }
+            return false;
         });
-        list->addItem(toggleEnabled);
+        list->addItem(launchDots);
 
-        static constexpr const char* enabledEn[] = {
-            "On: B or the menu combo shows the dots.",
-            "Off: B returns to the Ultrahand menu.",
+        static constexpr const char* launchEn[] = {
+            "Shows the dots over the game. The",
+            "Ultrahand combo brings you back here.",
         };
-        static constexpr const char* enabledTr[] = {
-            "Açık: B veya menü kombinasyonu",
-            "noktaları gösterir. Kapalı: B,",
-            "Ultrahand menüsüne döner.",
+        static constexpr const char* launchTr[] = {
+            "Noktaları oyunun üzerinde gösterir.",
+            "Ultrahand kombinasyonu buraya",
+            "geri getirir.",
         };
-        if (isTr) add_note(list, enabledTr, 3);
-        else      add_note(list, enabledEn, 2);
+        if (isTr) add_note(list, launchTr, 3);
+        else      add_note(list, launchEn, 2);
 
         auto *toggleConsoleSensor = new tsl::elm::ToggleListItem(isTr ? "Konsol Hareket Sensörü" : "Console Motion Sensor",
                                                                  g_config.general.console_sensor);
@@ -994,19 +1010,6 @@ public:
         });
         list->addItem(guideBtn);
 
-        // Ultrahand menu without turning the dots off (they stop until
-        // Kinestop is opened again).
-        auto *menuBtn = new tsl::elm::ListItem(isTr ? "Ultrahand Menüsü" : "Ultrahand Menu");
-        menuBtn->setClickListener([](u64 keys) {
-            if (keys & HidNpadButton_A) {
-                flush_config();
-                open_ultrahand_menu();
-                return true;
-            }
-            return false;
-        });
-        list->addItem(menuBtn);
-
         // 2. Language Selector (Between Guide and Reset Settings)
         auto *langTrackBar = new tsl::elm::NamedStepTrackBar("", {"English", "Türkçe"}, true, isTr ? "Dil / Language" : "Language");
         langTrackBar->setProgress(g_config.general.language);
@@ -1042,6 +1045,7 @@ public:
     virtual void update() override {
         if (g_needGuiReload) {
             g_needGuiReload = false;
+            register_launch_modes();  // the launch mode's label follows the language
             tsl::swapTo<GuiKinestopSettings>();
             return;
         }
@@ -1049,15 +1053,11 @@ public:
     }
 
     virtual bool handleInput(u64 keysDown, u64 keysHeld, const HidTouchState &touchPos, HidAnalogStickState joyStickPosLeft, HidAnalogStickState joyStickPosRight) override {
-        // SMART (B) BUTTON:
-        // - If Enabled: relaunch as the in-game HUD (floating dots in game!)
-        // - If Disabled: exit directly to Ultrahand main menu!
+        // B leaves Kinestop for the Ultrahand menu, however this panel was
+        // reached (the Guide's own B goes back here first).
         if (keysDown & HidNpadButton_B) {
             flush_config();
-            if (g_config.general.enabled)
-                relaunch(true);
-            else
-                open_ultrahand_menu();
+            return_to_ultrahand_menu();
             return true;
         }
         return false;
@@ -1107,18 +1107,6 @@ public:
         // them straight back to the game (and the HOME menu).
         if (g_hudMode)
             tsl::hlp::requestForeground(false);
-    }
-
-    // Settings mode only (the HUD is never hidden): a hide (menu combo,
-    // HOME, power, touch outside) leaves the panel, so the dots come back
-    // as with B. May run on libtesla's background poller thread: only
-    // queues the relaunch; libtesla's main loop sees launchingOverlay and
-    // exits, and exitServices() saves the config.
-    virtual void onHide() override {
-        if (g_hudMode || !g_config.general.enabled)
-            return;
-        queue_relaunch(true);
-        ult::launchingOverlay.store(true, std::memory_order_release);
     }
 
     virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {

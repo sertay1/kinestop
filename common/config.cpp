@@ -111,7 +111,6 @@ const char* bool_str(bool b) { return b ? "true" : "false"; }
 } // namespace
 
 void Config::set_defaults() {
-    general.enabled = true;
     general.poll_rate_hz = 60;
     general.language = 0; // 0: English, 1: Türkçe
     general.console_sensor = false;
@@ -205,12 +204,12 @@ bool Config::load(const char* filepath) {
         to_lower(key);
 
         // Unknown keys (including legacy ones such as draw_center_reticle,
-        // draw_roll_indicators and the 2.0.0 test builds' debug_flags) are
-        // ignored silently.
+        // draw_roll_indicators, the 2.0.0 test builds' debug_flags and the
+        // original's general.enabled: the dots now start from the menu's
+        // launch item) are ignored silently.
         switch (section) {
             case General:
-                if (!std::strcmp(key, "enabled")) general.enabled = parse_bool(val, general.enabled);
-                else if (!std::strcmp(key, "poll_rate_hz")) general.poll_rate_hz = parse_int(val, general.poll_rate_hz);
+                if (!std::strcmp(key, "poll_rate_hz")) general.poll_rate_hz = parse_int(val, general.poll_rate_hz);
                 else if (!std::strcmp(key, "language")) general.language = parse_int(val, general.language);
                 else if (!std::strcmp(key, "console_sensor")) general.console_sensor = parse_bool(val, general.console_sensor);
                 break;
@@ -265,7 +264,6 @@ bool Config::save(const char* filepath) const {
         "; ==========================================\n\n");
 
     std::fprintf(file, "[general]\n");
-    std::fprintf(file, "enabled = %s\n", bool_str(general.enabled));
     std::fprintf(file, "poll_rate_hz = %d\n", general.poll_rate_hz);
     std::fprintf(file, "language = %d\n", general.language);
     std::fprintf(file, "console_sensor = %s\n\n", bool_str(general.console_sensor));

@@ -1,10 +1,12 @@
 // Kinestop host tests - overlay/source/hud_frame.hpp: the HUD launch
-// argument and the dot frame drawn into the 640x360 HUD framebuffer.
+// argument, mode label, combo return and the dot frame drawn into the
+// 640x360 HUD framebuffer.
 //
 // Part of a modified version of the original Kinestop by SertAy
 // (https://github.com/sertay1/Kinestop).
 
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "check.hpp"
@@ -40,6 +42,43 @@ void test_launch_args() {
     CHECK(hud::is_hud_launch(3, silent_hud));
     CHECK(!hud::is_hud_launch(3, not_hud));
     CHECK(!hud::is_hud_launch(1, hud_as_path));
+}
+
+void test_mode_label() {
+    CHECK(std::strcmp(hud::mode_label(0), "Motion Dots") == 0);
+    CHECK(std::strcmp(hud::mode_label(1), "Hareket Noktaları") == 0);
+    CHECK(std::strcmp(hud::mode_label(7), "Motion Dots") == 0);  // unknown -> English
+}
+
+// The settings open only after the whole combo has been let go.
+void test_combo_release() {
+    constexpr uint64_t ZL = 1u << 0, ZR = 1u << 1, DDOWN = 1u << 2, A = 1u << 3;
+    constexpr uint64_t COMBO = ZL | ZR | DDOWN;
+
+    hud::ComboRelease r;
+    CHECK(!r.update(0, 0, COMBO));
+    CHECK(!r.update(ZL | ZR, ZL | ZR, COMBO));           // partial combo
+    CHECK(!r.armed);
+    CHECK(!r.update(DDOWN, COMBO, COMBO));                // combo complete
+    CHECK(r.armed);
+    CHECK(!r.update(0, COMBO, COMBO));                    // still held
+    CHECK(!r.update(0, ZR, COMBO));                       // a lone ZR left
+    CHECK(r.update(0, A, COMBO));                         // all combo keys up
+    CHECK(r.update(0, 0, COMBO));                         // stays fired
+
+    // A combo held from before (no fresh press) does not arm.
+    hud::ComboRelease held;
+    CHECK(!held.update(0, COMBO, COMBO));
+    CHECK(!held.armed);
+    CHECK(!held.update(0, 0, COMBO));
+
+    // Extra buttons do not matter, and an empty combo never fires.
+    hud::ComboRelease extra;
+    CHECK(!extra.update(COMBO | A, COMBO | A, COMBO));
+    CHECK(extra.update(0, A, COMBO));
+    hud::ComboRelease none;
+    CHECK(!none.update(A, A, 0));
+    CHECK(!none.update(0, 0, 0));
 }
 
 void test_frame_style() {
@@ -143,6 +182,8 @@ void test_draw() {
 
 int main() {
     test_launch_args();
+    test_mode_label();
+    test_combo_release();
     test_frame_style();
     test_centers();
     test_draw();

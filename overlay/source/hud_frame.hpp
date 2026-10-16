@@ -31,6 +31,33 @@ inline bool is_hud_launch(int argc, char** argv) {
     return false;
 }
 
+// Name of the HUD mode in the menu language: the label of the settings
+// menu's launch item and of the launch mode in Ultrahand's overlays.ini.
+inline const char* mode_label(int language) {
+    return language == 1 ? "Hareket Noktaları" : "Motion Dots";
+}
+
+// The HUD's way back to the settings: armed when the menu combo is pressed,
+// it fires once every button of the combo has been released, so the
+// settings panel never starts with combo buttons still held. (libtesla
+// reads a ZL/ZR/L/R first seen held on its own and let go within 400 ms as
+// a page/jump click: a lone ZR left over from ZL+ZR+DDOWN moved the cursor
+// a page down, onto Dot Opacity.)
+struct ComboRelease {
+    bool armed = false;
+
+    // Once per HUD frame; true on the frame the settings should open.
+    bool update(uint64_t keys_down, uint64_t keys_held, uint64_t combo) {
+        if (combo == 0)
+            return false;
+        if (!armed) {
+            armed = (keys_held & combo) == combo && (keys_down & combo) != 0;
+            return false;
+        }
+        return (keys_held & combo) == 0;
+    }
+};
+
 // Anchors, sizes and colors are fixed for a HUD launch (the settings live in
 // the other mode); only the shared offset changes per frame.
 struct DotFrame {

@@ -5,7 +5,6 @@
 namespace kinestop {
 
 struct GeneralConfig {
-    bool enabled = true;        // dots shown when the settings panel is left
     int poll_rate_hz = 60;
     int language = 0;           // 0: English, 1: Türkçe
     bool console_sensor = false; // also open the console IMU (SevenSixAxis, 512 KiB): dots move at the HOME menu

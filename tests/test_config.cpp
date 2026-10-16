@@ -36,7 +36,7 @@ bool file_exists(const std::string& path) {
 // Field-by-field equality; floats within `tol` (save() prints %g).
 bool same(const Config& a, const Config& b, double tol) {
     auto f = [tol](float x, float y) { return check::near(x, y, tol); };
-    return a.general.enabled == b.general.enabled && a.general.poll_rate_hz == b.general.poll_rate_hz &&
+    return a.general.poll_rate_hz == b.general.poll_rate_hz &&
            a.general.language == b.general.language && a.general.console_sensor == b.general.console_sensor &&
            a.visual.style == b.visual.style && a.visual.color == b.visual.color &&
            a.visual.density == b.visual.density && f(a.visual.opacity, b.visual.opacity) &&
@@ -53,7 +53,6 @@ bool same(const Config& a, const Config& b, double tol) {
 
 Config non_default() {
     Config c;
-    c.general.enabled = false;
     c.general.poll_rate_hz = 90;
     c.general.language = 1;
     c.general.console_sensor = true;
@@ -77,7 +76,6 @@ Config non_default() {
 
 // The original project's defaults (git show main:common/config.hpp).
 void check_original_defaults(const Config& c) {
-    CHECK_EQ(c.general.enabled, true);
     CHECK_EQ(c.general.poll_rate_hz, 60);
     CHECK_EQ(c.general.language, 0);
     CHECK_EQ(c.general.console_sensor, false);  // new field, off by default
@@ -186,7 +184,6 @@ void test_legacy_file() {
 
     Config c = non_default();
     CHECK(c.load(path.c_str()));
-    CHECK_EQ(c.general.enabled, true);
     CHECK_EQ(c.general.poll_rate_hz, 60);
     CHECK_EQ(c.general.language, 0);          // absent -> default
     CHECK_EQ(c.general.console_sensor, false); // absent -> default
@@ -279,14 +276,14 @@ void test_console_sensor() {
     CHECK_EQ(c.general.console_sensor, false);
 }
 
-// debug_flags from the 2.0.0 sysmodule test builds is ignored on load and
-// not written back.
+// debug_flags from the 2.0.0 sysmodule test builds and the original's
+// general.enabled (replaced by the menu's launch item) are ignored on load
+// and not written back.
 void test_legacy_debug_flags() {
     const std::string path = g_tmp + "/debug.ini";
     write_file(path, "[general]\nenabled = false\ndebug_flags = 13\nlanguage = 1\n");
     Config c;
     CHECK(c.load(path.c_str()));
-    CHECK_EQ(c.general.enabled, false);
     CHECK_EQ(c.general.language, 1);
     CHECK_EQ(c.general.console_sensor, false);
 
@@ -299,6 +296,7 @@ void test_legacy_debug_flags() {
         buf[n] = '\0';
         std::fclose(f);
         CHECK(std::strstr(buf, "debug_flags") == nullptr);
+        CHECK(std::strstr(buf, "enabled") == nullptr);
     }
 }
 
