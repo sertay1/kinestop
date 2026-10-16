@@ -18,6 +18,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <sys/stat.h>
@@ -98,11 +99,20 @@ namespace {
     // graceful-exit wait would freeze the panel, so start/stop run on a
     // short-lived thread. While it runs, the UI thread makes no IPC calls
     // (ipc_client is not thread-safe); pushes are redone when it finishes.
+    //
+    // g_ctlMutex serialises everything that touches ipc_client or the
+    // worker handle between the UI thread and Ultrahand's background event
+    // thread, which calls Overlay::hide() -> onHide() itself (launch combo
+    // while open, HOME, power). Recursive: the helpers below nest. The
+    // worker thread never takes it, so joining under it cannot deadlock.
     // ---------------------------------------------------------------------
+    std::recursive_mutex g_ctlMutex;
+    using CtlLock = std::lock_guard<std::recursive_mutex>;
+
     enum class Job : u8 { None, Start, Stop };
 
     Thread            g_worker{};
-    bool              g_workerActive = false;
+    std::atomic<bool> g_workerActive{false};
     Job               g_job          = Job::None;
     Result            g_jobRc        = 0;
     std::atomic<bool> g_jobDone{false};
@@ -110,8 +120,25 @@ namespace {
     Job    g_lastJob   = Job::None;  // outcome shown in the status line
     Result g_lastJobRc = 0;
 
+    // True between onShow and onHide. Read by the worker, which suspends a
+    // freshly started sysmodule while the panel is still on screen.
+    std::atomic<bool> g_panelVisible{false};
+
+    // initServices() already suspended the dots (and timed it) right before
+    // the panel's layer was created: the first onShow() need not repeat it.
+    bool g_suspendedAtInit = false;
+
     void worker_main(void*) {
-        g_jobRc = (g_job == Job::Start) ? ipc::start() : ipc::stop();
+        if (g_job == Job::Start) {
+            g_jobRc = ipc::start();
+            // The new process starts unsuspended and puts its layer up next
+            // to this panel's: take it down again at once. onHide joins the
+            // worker before resuming, so this cannot outlive the panel.
+            if (R_SUCCEEDED(g_jobRc) && g_panelVisible.load(std::memory_order_acquire))
+                ipc::setSuspended(true);
+        } else {
+            g_jobRc = ipc::stop();
+        }
         g_jobDone.store(true, std::memory_order_release);
     }
 
@@ -141,6 +168,33 @@ namespace {
 
     u64  g_lastRefreshNs = 0;
     bool g_refreshNow    = true;
+
+    // Diagnostics block (test builds): re-formatted on each status refresh
+    // (~1 Hz), drawn as-is every frame.
+    constexpr int DiagMaxLines   = 6;
+    constexpr u16 DiagLineStep   = 17;
+    constexpr u32 DiagFontSize   = 14;
+    constexpr u16 DiagBlockHeight = DiagMaxLines * DiagLineStep + 12;
+
+    std::string g_diagLines[DiagMaxLines];
+    tsl::Color  g_diagColors[DiagMaxLines] = {};
+    int         g_diagCount = 0;
+
+    // Previous snapshot, to show whether the counters move between refreshes.
+    bool g_diagPrevValid    = false;
+    u32  g_diagPrevLoop     = 0;
+    u32  g_diagPrevFrames   = 0;
+    u32  g_diagPrevTimeouts = 0;
+
+    // How long the sysmodule took to report its layer down after the last
+    // SetSuspended(true) sent on show: >= 0 ms, SuspendAckTimeout, or
+    // SuspendAckNone when no suspend was waited for.
+    constexpr s32 SuspendAckNone    = -2;
+    constexpr s32 SuspendAckTimeout = -1;
+    s32 g_suspendAckMs = SuspendAckNone;
+
+    constexpr u64 SuspendWaitNs = 300000000ULL;  // max wait for the layer to go down
+    constexpr u64 SuspendPollNs =  10000000ULL;
 
     // Results are shown the way HOS error screens and the sysmodule log
     // (sdmc:/config/kinestop/sysmodule.log) print them: 2xxx-yyyy.
@@ -172,6 +226,91 @@ namespace {
         g_noticeUntilNs = now_ns() + NoticeNs;
     }
 
+    __attribute__((format(printf, 2, 3)))
+    void add_diag_line(const tsl::Color& color, const char* fmt, ...) {
+        if (g_diagCount >= DiagMaxLines) return;
+        va_list args;
+        va_start(args, fmt);
+        format_into(g_diagLines[g_diagCount], fmt, args);
+        va_end(args);
+        g_diagColors[g_diagCount] = color;
+        ++g_diagCount;
+    }
+
+    const char* sensor_name(u32 source) {
+        switch (source) {
+            case KinestopSensor_SevenSixAxis: return "SevenSixAxis";
+            case KinestopSensor_NpadSixAxis:  return "Npad";
+            default:                          return is_tr() ? "yok" : "none";
+        }
+    }
+
+    // Rebuilds the diagnostics block from a fresh snapshot (nullptr: none).
+    void update_diagnostics(const KinestopStatus* st) {
+        const bool tr = is_tr();
+        g_diagCount = 0;
+
+        if (st == nullptr) {
+            g_diagPrevValid = false;
+            add_diag_line(ColorIdle, tr ? "Tanılama: veri yok" : "Diagnostics: no data");
+            return;
+        }
+
+        const bool prev = g_diagPrevValid;
+
+        // Sensor: which source and how far its sampling number moved in 1 s.
+        const bool sensorLive = st->sensor_source != KinestopSensor_None && st->sensor_advance_1s > 0;
+        add_diag_line(sensorLive ? ColorOk : ColorWarn,
+                      tr ? "Sensör: %s, +%u/sn" : "Sensor: %s, +%u/s",
+                      sensor_name(st->sensor_source), (unsigned)st->sensor_advance_1s);
+        if (st->seven_init_rc != 0)
+            add_diag_line(ColorWarn, tr ? "SevenSixAxis başlatılamadı: " KS_RC_FMT : "SevenSixAxis not started: " KS_RC_FMT,
+                          KS_RC_ARGS(st->seven_init_rc));
+
+        add_diag_line(ColorIdle, tr ? "Dikey %.1f  Yatay %.1f derece" : "Pitch %.1f  Roll %.1f deg",
+                      (double)st->pitch_deg, (double)st->roll_deg);
+
+        // Heartbeat: published at the top of every main-loop iteration, so a
+        // loop wedged in present() shows up as a counter that stops moving.
+        const u32 loopDelta   = st->loop_iterations - g_diagPrevLoop;
+        const u32 framesDelta = st->frames_presented - g_diagPrevFrames;
+        if (!prev) {
+            add_diag_line(ColorIdle, tr ? "Döngü %u | Kare %u" : "Loop %u | Frames %u",
+                          (unsigned)st->loop_iterations, (unsigned)st->frames_presented);
+        } else if (loopDelta == 0) {
+            add_diag_line(ColorError, tr ? "Döngü %u DURDU | Kare %u" : "Loop %u STALLED | Frames %u",
+                          (unsigned)st->loop_iterations, (unsigned)st->frames_presented);
+        } else {
+            add_diag_line(ColorOk, tr ? "Döngü %u (+%u) | Kare %u (+%u)" : "Loop %u (+%u) | Frames %u (+%u)",
+                          (unsigned)st->loop_iterations, (unsigned)loopDelta,
+                          (unsigned)st->frames_presented, (unsigned)framesDelta);
+        }
+
+        const bool newTimeouts = prev && st->dequeue_timeouts != g_diagPrevTimeouts;
+        add_diag_line(newTimeouts ? ColorWarn : ColorIdle,
+                      tr ? "Tampon zaman aşımı %u | Maks. sunum %u.%u ms" : "Dequeue timeouts %u | Max present %u.%u ms",
+                      (unsigned)st->dequeue_timeouts,
+                      (unsigned)(st->max_present_us / 1000), (unsigned)(st->max_present_us % 1000 / 100));
+
+        // Suspended state, plus how long the last suspend-on-show took.
+        const bool suspended = (st->flags & KINESTOP_STATUS_SUSPENDED) != 0;
+        char ack[32] = "";
+        if (g_suspendAckMs >= 0)
+            std::snprintf(ack, sizeof(ack), " (%d ms)", (int)g_suspendAckMs);
+        else if (g_suspendAckMs == SuspendAckTimeout)
+            std::snprintf(ack, sizeof(ack), "%s", tr ? " (onay yok)" : " (no ack)");
+        const bool expectSuspended = g_panelVisible.load(std::memory_order_relaxed);
+        add_diag_line((suspended != expectSuspended || g_suspendAckMs == SuspendAckTimeout) ? ColorWarn : ColorIdle,
+                      tr ? "Katman kurulumu %u | Askıda: %s%s" : "Layer inits %u | Suspended: %s%s",
+                      (unsigned)st->layer_inits,
+                      suspended ? (tr ? "evet" : "yes") : (tr ? "hayır" : "no"), ack);
+
+        g_diagPrevValid    = true;
+        g_diagPrevLoop     = st->loop_iterations;
+        g_diagPrevFrames   = st->frames_presented;
+        g_diagPrevTimeouts = st->dequeue_timeouts;
+    }
+
     const char* stage_name(u32 stage) {
         switch (stage) {
             case KinestopStage_ViInit:      return "VI init";
@@ -197,13 +336,9 @@ namespace {
             set_status(ColorError, tr ? "Başlatılamadı: " KS_RC_FMT : "Start failed: " KS_RC_FMT, KS_RC_ARGS(rc));
     }
 
-    // Queries the sysmodule and rebuilds the status line. A handful of cheap,
-    // fail-fast IPCs (pm:dmnt, sm HasService, GetStatus): called about once
-    // per second from update(), never per frame.
-    void refresh_status() {
-        g_lastRefreshNs = now_ns();
-        g_refreshNow    = false;
-
+    // Rebuilds the status line; returns true when *st_out holds a fresh
+    // GetStatus snapshot.
+    bool refresh_status_line(KinestopStatus* st_out) {
         const bool tr = is_tr();
 
         if (worker_busy()) {
@@ -211,7 +346,7 @@ namespace {
                 set_status(ColorWarn, tr ? "Başlatılıyor..." : "Starting...");
             else
                 set_status(ColorWarn, tr ? "Durduruluyor..." : "Stopping...");
-            return;
+            return false;
         }
 
         const bool running = ipc::isRunning();
@@ -229,32 +364,32 @@ namespace {
                 set_start_failed_status(g_lastJobRc);
             else
                 set_status(ColorIdle, tr ? "Durduruldu" : "Stopped");
-            return;
+            return false;
         }
 
         if (g_lastJob == Job::Stop && R_FAILED(g_lastJobRc)) {
             set_status(ColorError, tr ? "Durdurulamadı: " KS_RC_FMT : "Stop failed: " KS_RC_FMT, KS_RC_ARGS(g_lastJobRc));
-            return;
+            return false;
         }
 
         if (!ipc::connect()) {
             set_status(ColorWarn, tr ? "Çalışıyor - IPC yok" : "Running - no IPC");
-            return;
+            return false;
         }
 
         if (!ipc::apiCompatible()) {
             set_status(ColorError, tr ? "API uyumsuz (v%u, beklenen v%u)" : "API mismatch (v%u, need v%u)",
                        ipc::remoteApiVersion(), (u32)KINESTOP_API_VERSION);
-            return;
+            return false;
         }
 
-        KinestopStatus st{};
+        KinestopStatus& st = *st_out;
         Result rc = ipc::getStatus(&st);
         if (R_FAILED(rc) && ipc::connect())  // stale session (module restarted): retry once
             rc = ipc::getStatus(&st);
         if (R_FAILED(rc)) {
             set_status(ColorError, tr ? "Hata: IPC " KS_RC_FMT : "Error: IPC " KS_RC_FMT, KS_RC_ARGS(rc));
-            return;
+            return false;
         }
 
         if (st.last_error_rc != 0) {
@@ -265,15 +400,64 @@ namespace {
         } else {
             set_status(ColorOk, tr ? "Çalışıyor" : "Running");
         }
+        return true;
+    }
+
+    // Queries the sysmodule and rebuilds the status line and the diagnostics
+    // block. A handful of cheap, fail-fast IPCs (pm:dmnt, sm HasService,
+    // GetStatus): called about once per second from update(), never per
+    // frame.
+    void refresh_status() {
+        CtlLock lock(g_ctlMutex);
+        g_lastRefreshNs = now_ns();
+        g_refreshNow    = false;
+
+        KinestopStatus st{};
+        const bool have = refresh_status_line(&st);
+        update_diagnostics(have ? &st : nullptr);
+
+        // Panel on screen but the layer is up (sysmodule started from
+        // elsewhere, or a lost SetSuspended): ask again.
+        if (have && g_panelVisible.load(std::memory_order_relaxed) && !(st.flags & KINESTOP_STATUS_SUSPENDED))
+            ipc::setSuspended(true);
     }
 
     // Pushes the current settings to a running sysmodule. Not persisted by
     // the sysmodule; config.ini is written by the overlay.
     void push_config() {
+        CtlLock lock(g_ctlMutex);
         if (worker_busy()) return;  // re-pushed when the job finishes
         KinestopWireConfig wire{};
-        g_config.to_wire(wire);
+        g_config.to_wire(wire);     // carries debug_flags too
         ipc::setConfig(wire);       // no-op (fail-fast) when not running
+    }
+
+    // Sends SetSuspended to a running sysmodule (fail-fast otherwise). With
+    // waitForLayerDown, polls its status for up to SuspendWaitNs until it
+    // reports the layer gone, so this panel's layer does not have to share
+    // the display with ours; the time it took is shown in the diagnostics.
+    void suspend_dots(bool suspend, bool waitForLayerDown) {
+        CtlLock lock(g_ctlMutex);
+        if (worker_busy() || !ipc::isRunning())
+            return;
+        if (R_FAILED(ipc::setSuspended(suspend)) || !suspend || !waitForLayerDown)
+            return;
+
+        const u64 start = now_ns();
+        for (;;) {
+            KinestopStatus st{};
+            if (R_FAILED(ipc::getStatus(&st)))
+                break;
+            const u64 elapsed = now_ns() - start;
+            if ((st.flags & KINESTOP_STATUS_SUSPENDED) && !(st.flags & KINESTOP_STATUS_LAYER_OK)) {
+                g_suspendAckMs = (s32)(elapsed / 1000000ULL);
+                return;
+            }
+            if (elapsed >= SuspendWaitNs)
+                break;
+            svcSleepThread(SuspendPollNs);
+        }
+        g_suspendAckMs = SuspendAckTimeout;
     }
 
     // Every setting except the master toggle goes through here.
@@ -284,6 +468,7 @@ namespace {
     }
 
     void on_job_finished() {
+        CtlLock lock(g_ctlMutex);
         join_worker();
 
         g_lastJob   = g_job;
@@ -304,6 +489,7 @@ namespace {
     }
 
     void start_job(Job job) {
+        CtlLock lock(g_ctlMutex);
         if (g_workerActive) return;
 
         g_job = job;
@@ -328,6 +514,7 @@ namespace {
     // Per-frame housekeeping shared by every Gui. Cheap unless a refresh is
     // due: an atomic load and a few tick comparisons.
     void tick_background() {
+        CtlLock lock(g_ctlMutex);
         if (g_workerActive && g_jobDone.load(std::memory_order_acquire))
             on_job_finished();
 
@@ -444,10 +631,16 @@ public:
             add_header("NASIL ÇALIŞIR?", make_color(80, 240, 120));
             add_body("Noktaları bu menü değil, arka planda çalışan");
             add_body("küçük bir sistem modülü (sysmodule) çizer.");
-            add_body("Menüyü kapatsanız da noktalar ekranda kalır;");
+            add_body("Menüyü gizleseniz de noktalar ekranda kalır;");
             add_body("böylece Status Monitor gibi diğer overlay'leri");
             add_body("aynı anda kullanabilirsiniz. Ultrahand'in");
             add_body("varsayılan 4 MB overlay belleği yeterlidir.");
+            add_body("Bu panel açıkken noktalar duraklatılır;");
+            add_body("paneli açma kombinasyonuyla gizleyince");
+            add_body("yeniden görünürler. B ile çıkarsanız");
+            add_body("(Ultrahand menüsüne dönüş) duraklatılmış");
+            add_body("kalırlar, böylece menü görünür kalır");
+            add_body("(deneme sürümü).");
 
             add_header("GELİŞTİRİCİ VE BAĞIŞ LİNKLERİ", make_color(80, 200, 255));
             add_body("Geliştirici: SertAy");
@@ -475,8 +668,8 @@ public:
 
             add_sub("Hareket Noktalarını Aç:", make_color(255, 210, 60));
             add_body("Noktaları çizen arka plan modülünü başlatır");
-            add_body("veya durdurur. Menüyü kapatınca noktalar");
-            add_body("çalışmaya devam eder.");
+            add_body("veya durdurur. Menüyü kombinasyonla");
+            add_body("gizleyince noktalar çalışmaya devam eder.");
 
             add_sub("Açılışta Noktaları Başlat:", make_color(255, 210, 60));
             add_body("Noktaları konsol açılırken otomatik başlatır.");
@@ -542,11 +735,16 @@ public:
             // ==================== ENGLISH GUIDE ====================
             add_header("HOW IT WORKS", make_color(80, 240, 120));
             add_body("The dots are drawn by a small background");
-            add_body("sysmodule, not by this menu. Close the menu");
+            add_body("sysmodule, not by this menu. Hide the menu");
             add_body("and the dots keep running, so you can use");
             add_body("other overlays (e.g. Status Monitor) at the");
             add_body("same time. Ultrahand's default 4 MB overlay");
             add_body("memory is enough.");
+            add_body("The dots pause while this panel is open");
+            add_body("and come back when you hide it with the");
+            add_body("launch combo. Leaving with B (back to the");
+            add_body("Ultrahand menu) keeps them paused so that");
+            add_body("menu stays visible (test build).");
 
             add_header("CREATOR & DONATION LINKS", make_color(80, 200, 255));
             add_body("Developer: SertAy");
@@ -573,8 +771,8 @@ public:
 
             add_sub("Enable Motion Dots:", make_color(255, 210, 60));
             add_body("Starts or stops the background sysmodule");
-            add_body("that draws the dots. Closing this menu");
-            add_body("keeps the dots running.");
+            add_body("that draws the dots. Hiding this menu");
+            add_body("with the combo keeps the dots running.");
 
             add_sub("Start Dots at Boot:", make_color(255, 210, 60));
             add_body("Starts the dots automatically at boot. Off");
@@ -764,6 +962,14 @@ public:
             start_job(newState ? Job::Start : Job::Stop);
         });
         list->addItem(m_toggleEnabled);
+
+        // Diagnostics block (test build): lines are re-formatted by
+        // refresh_status() about once per second.
+        list->addItem(new tsl::elm::CustomDrawer([](tsl::gfx::Renderer *renderer, s32 x, s32 y, s32 w, s32 h) {
+            for (int i = 0; i < g_diagCount; ++i)
+                renderer->drawString(g_diagLines[i], false, x + 19, y + 16 + i * DiagLineStep, DiagFontSize,
+                                     g_diagColors[i], w - 30);
+        }), DiagBlockHeight);
 
         m_toggleBoot = new tsl::elm::ToggleListItem(isTr ? "Açılışta Noktaları Başlat" : "Start Dots at Boot",
                                                     file_exists(BootFlagPath));
@@ -968,6 +1174,7 @@ public:
         calibCurrentBtn->setClickListener([](u64 keys) {
             if (keys & HidNpadButton_A) {
                 const bool tr = is_tr();
+                CtlLock lock(g_ctlMutex);
                 if (worker_busy() || !ipc::isRunning()) {
                     show_notice(ColorWarn, tr ? "Önce noktaları açın" : "Enable the dots first");
                     return true;
@@ -1003,6 +1210,47 @@ public:
             return false;
         });
         list->addItem(resetCalibItem);
+
+        // ------------------ DIAGNOSTICS (TEST BUILD) ------------------
+        list->addItem(new tsl::elm::CategoryHeader(isTr ? "Tanılama (test sürümü)" : "Diagnostics (test build)"));
+
+        struct DebugToggle { const char* en; const char* tr; u32 bit; };
+        static constexpr DebugToggle debugToggles[] = {
+            { "Blink test",          "Yanıp sönme testi",          KINESTOP_DEBUG_BLINK_TEST },
+            { "Unscaled test layer", "Ölçeklenmemiş test katmanı", KINESTOP_DEBUG_UNSCALED_LAYER },
+            { "Verbose log",         "Ayrıntılı günlük",           KINESTOP_DEBUG_VERBOSE_LOG },
+        };
+        for (const auto& dt : debugToggles) {
+            auto *toggle = new tsl::elm::ToggleListItem(isTr ? dt.tr : dt.en,
+                                                        (g_config.general.debug_flags & dt.bit) != 0);
+            const u32 bit = dt.bit;
+            toggle->setStateChangedListener([bit](bool newState) {
+                if (newState)
+                    g_config.general.debug_flags |= (int)bit;
+                else
+                    g_config.general.debug_flags &= ~(int)bit;
+                g_config.sanitize();
+                save_config_now();
+                push_config();
+            });
+            list->addItem(toggle);
+        }
+
+        list->addItem(new tsl::elm::CustomDrawer([isTr](tsl::gfx::Renderer *renderer, s32 x, s32 y, s32 w, s32 h) {
+            const tsl::Color note = make_color(255, 170, 50);
+            renderer->drawString(isTr ? "Yanıp sönme: her 10 sn'de 3 sn kapalı." : "Blink: dots off 3 s out of every 10 s.",
+                                 false, x + 19, y + 20, 15, note);
+            renderer->drawString(isTr ? "Ölçeksiz: 1:1 katman, sol üst çeyrek." : "Unscaled: 1:1 layer, top-left quarter.",
+                                 false, x + 19, y + 40, 15, note);
+            renderer->drawString(isTr ? "Günlük: sysmodule.log'a saniyede 1 satır." : "Log: 1 line per second in sysmodule.log.",
+                                 false, x + 19, y + 60, 15, note);
+            renderer->drawString(isTr ? "Panel açıkken noktalar duraklatılır." : "Dots are paused while this panel is open.",
+                                 false, x + 19, y + 80, 15, note);
+            renderer->drawString(isTr ? "Devam için paneli kombinasyonla gizleyin;" : "Hide it with the combo to resume them;",
+                                 false, x + 19, y + 100, 15, note);
+            renderer->drawString(isTr ? "B ile çıkınca duraklatılmış kalırlar." : "B (back to the menu) keeps them paused.",
+                                 false, x + 19, y + 120, 15, note);
+        }), 132);
 
         // ------------------ GUIDE & MAINTENANCE ------------------
         list->addItem(new tsl::elm::CategoryHeader(isTr ? "Rehber ve Bakım" : "Guide & Maintenance"));
@@ -1072,7 +1320,8 @@ public:
     }
 
     virtual bool handleInput(u64 keysDown, u64 keysHeld, const HidTouchState &touchPos, HidAnalogStickState joyStickPosLeft, HidAnalogStickState joyStickPosRight) override {
-        // B closes the panel; the dots keep running in the sysmodule.
+        // B closes the panel (back to the Ultrahand menu). The dots stay
+        // suspended (see exitServices); hiding with the combo resumes them.
         if (keysDown & HidNpadButton_B) {
             flush_config();
             tsl::goBack();
@@ -1084,23 +1333,56 @@ public:
 
 class KinestopOverlay : public tsl::Overlay {
 public:
+    // While this panel is on screen the sysmodule takes its own VI layer
+    // down (test build v2.0.0-test.2: suspected that the display does not
+    // composite this panel's layer while ours exists). initServices() runs
+    // before libtesla creates its layer (initScreen), exitServices() after
+    // it is destroyed (exitScreen). onShow() runs on the main loop thread;
+    // onHide() also from Ultrahand's background event thread, hence the lock.
     virtual void initServices() override {
         g_config.load();
         ipc::initialize();  // pm:shell (launch/terminate) + pm:dmnt (liveness)
+        suspend_dots(true, true);
+        g_suspendedAtInit = true;
     }
 
+    // The process only exits to load another Tesla overlay: the Ultrahand
+    // menu (B at the root, combo return - often shown at once) or another
+    // overlay's launch combo. Resuming here would put our layer back up
+    // just as that overlay's layer appears, i.e. symptom (A) for the menu
+    // itself. So the dots stay suspended (and are suspended again if the
+    // panel was hidden); they resume when this panel is hidden with the
+    // combo (onHide), or when the sysmodule is restarted.
     virtual void exitServices() override {
-        join_worker();  // bounded: start() <= ~1.5s, stop() <= ~1s
+        CtlLock lock(g_ctlMutex);
+        g_panelVisible.store(false, std::memory_order_release);
+        if (worker_busy())
+            on_job_finished();  // joins: bounded, start() <= ~1.5s, stop() <= ~1s
         flush_config();
+        suspend_dots(true, false);
         ipc::exit();
     }
 
     virtual void onShow() override {
+        CtlLock lock(g_ctlMutex);
+        g_panelVisible.store(true, std::memory_order_release);
+        if (g_suspendedAtInit)
+            g_suspendedAtInit = false;  // keep the ack time measured there
+        else
+            suspend_dots(true, true);   // waits <= SuspendWaitNs for the layer to go
         g_refreshNow = true;
     }
 
     virtual void onHide() override {
+        CtlLock lock(g_ctlMutex);
+        g_panelVisible.store(false, std::memory_order_release);
+        g_suspendedAtInit = false;
+        // Rare: hidden while a start/stop is in flight. Finish it first (the
+        // worker may be about to suspend, and ipc_client is single-threaded).
+        if (worker_busy())
+            on_job_finished();
         flush_config();
+        suspend_dots(false, false);
     }
 
     virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {

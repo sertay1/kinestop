@@ -57,6 +57,11 @@ namespace kinestop::ipc {
     Result calibrate(KinestopCalibration *out);
     Result requestExit();
 
+    /* true: the sysmodule takes its VI layer down (keeps sampling) so this
+     * panel's Tesla layer is the only extra layer on screen; false: brings
+     * it back. Fail-fast when the sysmodule is not running. */
+    Result setSuspended(bool suspended);
+
     /* Launches the sysmodule (if not already running) and waits up to ~1.5s
      * for its service to register, then verifies the API version.
      * Blocking: run it off the render thread. */

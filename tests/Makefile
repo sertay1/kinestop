@@ -8,7 +8,7 @@
 #
 # Uses the host compiler only; no devkitPro needed. The code under test is the
 # real common/config.cpp, common/dots.cpp and the header-only
-# sysmodule/source/{swizzle,raster}.hpp.
+# sysmodule/source/{swizzle,raster,bounded_dequeue}.hpp.
 #---------------------------------------------------------------------------------
 
 HOSTCXX  ?= g++
@@ -21,7 +21,7 @@ CPPFLAGS := -I$(ROOT)/common -I$(ROOT)/sysmodule/source -MMD -MP
 CXXFLAGS := -std=c++20 -Wall -Wextra -O1 -g
 CFLAGS   := -std=c11 -Wall -Wextra -O1 -g
 
-TESTS    := test_swizzle test_dots test_config test_ipc test_raster
+TESTS    := test_swizzle test_dots test_config test_ipc test_raster test_dequeue
 BINS     := $(addprefix $(BUILD)/,$(TESTS))
 
 COMMON_OBJS := $(BUILD)/config.o $(BUILD)/dots.o
@@ -57,6 +57,9 @@ $(BUILD)/test_swizzle: $(BUILD)/test_swizzle.o
 	$(HOSTCXX) $^ -o $@
 
 $(BUILD)/test_raster: $(BUILD)/test_raster.o
+	$(HOSTCXX) $^ -o $@
+
+$(BUILD)/test_dequeue: $(BUILD)/test_dequeue.o
 	$(HOSTCXX) $^ -o $@
 
 $(BUILD)/test_dots: $(BUILD)/test_dots.o $(COMMON_OBJS)

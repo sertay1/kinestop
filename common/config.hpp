@@ -9,6 +9,7 @@ struct GeneralConfig {
     bool enabled = true;        // user wants dots shown (overlay starts/stops the sysmodule from this)
     int poll_rate_hz = 60;
     int language = 0;           // 0: English, 1: Türkçe
+    int debug_flags = 0;        // KINESTOP_DEBUG_* bitmask (test builds); ini key "debug_flags"
 };
 
 struct VisualConfig {
@@ -54,7 +55,7 @@ struct Config {
     void sanitize();
 
     void to_wire(KinestopWireConfig& out) const;
-    void from_wire(const KinestopWireConfig& in);  // sanitizes; leaves general.* untouched
+    void from_wire(const KinestopWireConfig& in);  // sanitizes; of general.* only poll_rate_hz and debug_flags are on the wire
 };
 
 } // namespace kinestop

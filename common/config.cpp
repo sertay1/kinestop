@@ -114,6 +114,7 @@ void Config::set_defaults() {
     general.enabled = true;
     general.poll_rate_hz = 60;
     general.language = 0; // 0: English, 1: Türkçe
+    general.debug_flags = 0;
 
     visual.style = 0;
     visual.color = 0;
@@ -137,6 +138,10 @@ void Config::set_defaults() {
 void Config::sanitize() {
     general.poll_rate_hz = clampi(general.poll_rate_hz, 10, 120);
     general.language = clampi(general.language, 0, 1);
+    // 0..7: unknown bits are dropped rather than clamped (each bit is its own
+    // switch); a negative value is treated as "none", not as "all bits".
+    general.debug_flags = general.debug_flags < 0 ? 0
+        : general.debug_flags & (int)(KINESTOP_DEBUG_BLINK_TEST | KINESTOP_DEBUG_UNSCALED_LAYER | KINESTOP_DEBUG_VERBOSE_LOG);
 
     // Unknown styles fall back to Perimeter (0), as the original
     // get_anchors() did with `default: case 0:`.
@@ -210,6 +215,7 @@ bool Config::load(const char* filepath) {
                 if (!std::strcmp(key, "enabled")) general.enabled = parse_bool(val, general.enabled);
                 else if (!std::strcmp(key, "poll_rate_hz")) general.poll_rate_hz = parse_int(val, general.poll_rate_hz);
                 else if (!std::strcmp(key, "language")) general.language = parse_int(val, general.language);
+                else if (!std::strcmp(key, "debug_flags")) general.debug_flags = parse_int(val, general.debug_flags);
                 break;
             case Visual:
                 if (!std::strcmp(key, "style")) visual.style = parse_int(val, visual.style);
@@ -264,7 +270,8 @@ bool Config::save(const char* filepath) const {
     std::fprintf(file, "[general]\n");
     std::fprintf(file, "enabled = %s\n", bool_str(general.enabled));
     std::fprintf(file, "poll_rate_hz = %d\n", general.poll_rate_hz);
-    std::fprintf(file, "language = %d\n\n", general.language);
+    std::fprintf(file, "language = %d\n", general.language);
+    std::fprintf(file, "debug_flags = %d\n\n", general.debug_flags);
 
     std::fprintf(file, "[visual]\n");
     std::fprintf(file, "style = %d\n", visual.style);
@@ -306,6 +313,7 @@ void Config::to_wire(KinestopWireConfig& out) const {
     out.invert_roll = c.calibration.invert_roll ? 1 : 0;
     out.show_in_captures = c.visual.show_in_captures ? 1 : 0;
     out.poll_rate_hz = (uint16_t)c.general.poll_rate_hz;
+    out.debug_flags = (uint8_t)c.general.debug_flags;
     out.opacity = c.visual.opacity;
     out.filter_alpha = c.filter.alpha;
     out.deadzone_deg = c.filter.deadzone_deg;
@@ -334,8 +342,9 @@ void Config::from_wire(const KinestopWireConfig& in) {
     calibration.sensitivity_pitch = in.sensitivity_pitch;
     calibration.sensitivity_roll = in.sensitivity_roll;
 
-    // The only general.* field carried on the wire.
+    // The only general.* fields carried on the wire.
     general.poll_rate_hz = in.poll_rate_hz;
+    general.debug_flags = in.debug_flags;
 
     sanitize();
 }

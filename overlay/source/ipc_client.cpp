@@ -174,6 +174,15 @@ namespace kinestop::ipc {
         return check(serviceDispatchOut(&g_srv, KinestopCmd_Calibrate, *out));
     }
 
+    Result setSuspended(bool suspended) {
+        if (!connect())
+            return ResultNotRunning;
+        if (!apiCompatible())
+            return ResultApiMismatch;
+        const u8 in = suspended ? 1 : 0;
+        return check(serviceDispatchIn(&g_srv, KinestopCmd_SetSuspended, in));
+    }
+
     /* Exit is void -> void and numbered 3 in every API version (the
      * sys-clk / ovl-sysmodules convention), so it is sent even on an API
      * mismatch. */

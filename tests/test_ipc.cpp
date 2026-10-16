@@ -41,9 +41,28 @@ bool contains(const std::string& hay, const std::string& needle) {
     return hay.find(needle) != std::string::npos;
 }
 
+// Value of `APP_VERSION := x` in a devkitPro Makefile ("" if absent).
+std::string makefile_version(const std::string& path) {
+    const std::string text = read_file(path.c_str());
+    const std::string key = "APP_VERSION";
+    for (size_t pos = text.find(key); pos != std::string::npos; pos = text.find(key, pos + 1)) {
+        if (pos != 0 && text[pos - 1] != '\n') continue;  // must start a line
+        size_t i = text.find(":=", pos);
+        const size_t eol = text.find('\n', pos);
+        if (i == std::string::npos || (eol != std::string::npos && i > eol)) continue;
+        i += 2;
+        while (i < text.size() && (text[i] == ' ' || text[i] == '\t')) ++i;
+        size_t end = i;
+        while (end < text.size() && text[end] != '\n' && text[end] != '\r' && text[end] != ' ' && text[end] != '\t')
+            ++end;
+        return text.substr(i, end - i);
+    }
+    return "";
+}
+
 void test_struct_sizes() {
     CHECK_EQ(sizeof(KinestopWireConfig), 40u);
-    CHECK_EQ(sizeof(KinestopStatus), 32u);
+    CHECK_EQ(sizeof(KinestopStatus), 64u);
     CHECK_EQ(sizeof(KinestopCalibration), 8u);
     CHECK_EQ(alignof(KinestopWireConfig), 4u);
     CHECK_EQ(alignof(KinestopStatus), 4u);
@@ -51,7 +70,7 @@ void test_struct_sizes() {
     size_t w = 0, s = 0, c = 0;
     CHECK_EQ(kinestop_ipc_c_sizes(&w, &s, &c), 1);
     CHECK_EQ(w, 40u);
-    CHECK_EQ(s, 32u);
+    CHECK_EQ(s, 64u);
     CHECK_EQ(c, 8u);
 }
 
@@ -66,7 +85,9 @@ void test_layout() {
     CHECK_EQ(offsetof(KinestopWireConfig, invert_roll), 6u);
     CHECK_EQ(offsetof(KinestopWireConfig, show_in_captures), 7u);
     CHECK_EQ(offsetof(KinestopWireConfig, poll_rate_hz), 8u);
-    CHECK_EQ(offsetof(KinestopWireConfig, reserved), 10u);
+    CHECK_EQ(offsetof(KinestopWireConfig, debug_flags), 10u);  // was reserved[0] in API v1
+    CHECK_EQ(offsetof(KinestopWireConfig, reserved), 11u);
+    CHECK_EQ(sizeof(((KinestopWireConfig*)nullptr)->debug_flags), 1u);
     CHECK_EQ(offsetof(KinestopWireConfig, opacity), 12u);
     CHECK_EQ(offsetof(KinestopWireConfig, filter_alpha), 16u);
     CHECK_EQ(offsetof(KinestopWireConfig, deadzone_deg), 20u);
@@ -83,7 +104,16 @@ void test_layout() {
     CHECK_EQ(offsetof(KinestopStatus, last_error_rc), 16u);
     CHECK_EQ(offsetof(KinestopStatus, last_error_stage), 20u);
     CHECK_EQ(offsetof(KinestopStatus, frames_presented), 24u);
-    CHECK_EQ(offsetof(KinestopStatus, reserved), 28u);
+    // API v2 additions; the v1 prefix above is unchanged.
+    CHECK_EQ(offsetof(KinestopStatus, loop_iterations), 28u);
+    CHECK_EQ(offsetof(KinestopStatus, sensor_source), 32u);
+    CHECK_EQ(offsetof(KinestopStatus, sensor_advance_1s), 36u);
+    CHECK_EQ(offsetof(KinestopStatus, dequeue_timeouts), 40u);
+    CHECK_EQ(offsetof(KinestopStatus, max_present_us), 44u);
+    CHECK_EQ(offsetof(KinestopStatus, layer_inits), 48u);
+    CHECK_EQ(offsetof(KinestopStatus, seven_init_rc), 52u);
+    CHECK_EQ(offsetof(KinestopStatus, reserved), 56u);
+    CHECK_EQ(sizeof(((KinestopStatus*)nullptr)->reserved), 8u);
 
     // KinestopCalibration
     CHECK_EQ(offsetof(KinestopCalibration, pitch_offset), 0u);
@@ -93,6 +123,7 @@ void test_layout() {
     // IPC_SERVER_MAX_DATA_SIZE = 0x100 - 0x10 - 16 = 224 bytes).
     CHECK(sizeof(KinestopWireConfig) <= 224u);
     CHECK(sizeof(KinestopStatus) <= 224u);
+    CHECK(sizeof(KinestopCalibration) <= 224u);
 }
 
 void test_constants() {
@@ -101,6 +132,7 @@ void test_constants() {
     CHECK_EQ(KinestopCmd_SetConfig, 2);
     CHECK_EQ(KinestopCmd_Exit, 3);  // ovl-sysmodules toolbox.json "shutdown_cmd"
     CHECK_EQ(KinestopCmd_Calibrate, 4);
+    CHECK_EQ(KinestopCmd_SetSuspended, 5);  // payload: one u8 (bool)
 
     CHECK_EQ(KinestopStage_None, 0);
     CHECK_EQ(KinestopStage_ViInit, 1);
@@ -113,7 +145,18 @@ void test_constants() {
 
     CHECK_EQ(KINESTOP_STATUS_LAYER_OK, 1u);
     CHECK_EQ(KINESTOP_STATUS_SENSOR_OK, 2u);
-    CHECK(KINESTOP_API_VERSION >= 1);
+    CHECK_EQ(KINESTOP_STATUS_SUSPENDED, 4u);
+    CHECK_EQ(KINESTOP_API_VERSION, 2);
+
+    CHECK_EQ(KinestopSensor_None, 0);
+    CHECK_EQ(KinestopSensor_SevenSixAxis, 1);
+    CHECK_EQ(KinestopSensor_NpadSixAxis, 2);
+
+    // debug_flags: three distinct bits, all fitting the u8 wire field.
+    CHECK_EQ(KINESTOP_DEBUG_BLINK_TEST, 1u);
+    CHECK_EQ(KINESTOP_DEBUG_UNSCALED_LAYER, 2u);
+    CHECK_EQ(KINESTOP_DEBUG_VERBOSE_LOG, 4u);
+    CHECK((KINESTOP_DEBUG_BLINK_TEST | KINESTOP_DEBUG_UNSCALED_LAYER | KINESTOP_DEBUG_VERBOSE_LOG) <= 0xFFu);
 
     // SM names are at most 8 bytes.
     const size_t name_len = std::strlen(KINESTOP_SERVICE_NAME);
@@ -149,6 +192,34 @@ void test_metadata(const char* root) {
     CHECK(contains(toolbox, std::string("\"shutdown_service\":\"") + KINESTOP_SERVICE_NAME + "\""));
     CHECK(contains(toolbox, "\"shutdown_cmd\":" + std::to_string((int)KinestopCmd_Exit)));
     CHECK(contains(toolbox, "\"requires_reboot\":false"));
+
+    // One version string for the whole release: both Makefiles, toolbox.json
+    // and the sysmodule's fallback define.
+    const std::string sys_ver = makefile_version(base + "/sysmodule/Makefile");
+    const std::string ovl_ver = makefile_version(base + "/overlay/Makefile");
+    CHECK(!sys_ver.empty());
+    CHECK_EQ(sys_ver, ovl_ver);
+    CHECK(contains(toolbox, "\"version\":\"" + sys_ver + "\""));
+    CHECK(contains(read_file((base + "/sysmodule/source/main.cpp").c_str()),
+                   "#define APP_VERSION \"" + sys_ver + "\""));
+}
+
+// Both ends name every command: the sysmodule handles it (a `case`), the
+// overlay's client sends it. Catches a command added on one side only.
+void test_both_sides(const char* root) {
+    const std::string base = root;
+    const std::string server = read_file((base + "/sysmodule/source/main.cpp").c_str());
+    const std::string client = read_file((base + "/overlay/source/ipc_client.cpp").c_str());
+    CHECK(!server.empty());
+    CHECK(!client.empty());
+    for (const char* cmd : {"KinestopCmd_GetApiVersion", "KinestopCmd_GetStatus", "KinestopCmd_SetConfig",
+                            "KinestopCmd_Exit", "KinestopCmd_Calibrate", "KinestopCmd_SetSuspended"}) {
+        CHECK_ALL(contains(server, std::string("case ") + cmd + ":"), "sysmodule does not handle %s", cmd);
+        CHECK_ALL(contains(client, cmd), "overlay never sends %s", cmd);
+    }
+    // SetSuspended carries exactly one byte; the server reads it as u8.
+    CHECK(contains(client, "const u8 in = suspended ? 1 : 0;"));
+    CHECK(contains(server, "*static_cast<const u8*>(r->data.ptr) != 0"));
 }
 
 } // namespace
@@ -158,5 +229,6 @@ int main(int argc, char** argv) {
     test_layout();
     test_constants();
     test_metadata(argc > 1 ? argv[1] : "..");
+    test_both_sides(argc > 1 ? argv[1] : "..");
     return check::summary("ipc");
 }

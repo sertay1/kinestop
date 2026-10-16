@@ -18,17 +18,28 @@
 //     Null (the stack of the empty display). None of them is needed for the
 //     LCD or a TV (Default + Lcd), so we leave them out.
 //   * The framebuffer is 640x360 and the layer is the whole 1920x1080 VI
-//     space, so VI upscales it 3x (FitToLayer).
+//     space, so VI upscales it 3x (FitToLayer). KINESTOP_DEBUG_UNSCALED_LAYER
+//     shrinks the layer to 960x540 VI units (1:1 in handheld) instead.
 //   * Buffers are dequeued/queued by hand instead of framebufferBegin/End,
 //     which call diagAbortWithResult() on failure. Here a failure just tears
 //     the layer down so the main loop can retry.
-//   * The dequeue is preceded by a bounded wait on the buffer-release event
-//     (nwindowDequeueBuffer() itself waits forever), and only the GOBs that
-//     were written are flushed from the data cache, not the whole slot.
+//   * The dequeue has a real deadline (dequeue_bounded(), a copy of
+//     nwindowDequeueBuffer()'s bookkeeping): nwindowDequeueBuffer() loops on
+//     eventWait(UINT64_MAX) around an async dequeue, and since the binder
+//     event is loaded with autoclear=false and never reset by libnx, it can
+//     both block forever and busy-spin IPCs; it then waits the release fence
+//     with no timeout. The waiting policy lives in bounded_dequeue.hpp.
+//   * No vsync wait before queueing (libtesla has one): GetDisplayVsyncEvent
+//     is one more per-display vi resource next to Tesla's, which treats a
+//     failure to get its own as fatal; presents are paced by poll_rate_hz.
+//   * Only the GOBs that were written are flushed from the data cache, not
+//     the whole slot.
 
 #include "renderer.hpp"
 
 #include <cstring>
+
+#include "bounded_dequeue.hpp"
 
 extern "C" u64 __nx_vi_layer_id;
 
@@ -38,8 +49,26 @@ namespace {
 
 // How long a present waits for the compositor to release a buffer before it
 // skips the frame (the main loop tries again next iteration). With two
-// buffers and vsync a release is normally at most one refresh (~17 ms) away.
-constexpr u64 DEQUEUE_TIMEOUT_NS = 100000000ULL;  // 100 ms
+// buffers a release is normally at most one refresh (~17 ms) away.
+constexpr u64 DEQUEUE_DEADLINE_NS = 20000000ULL;  // 20 ms
+
+// Longest single wait on the release event inside that deadline. Short, so a
+// release that HOS does not signal (the event's exact semantics are not
+// documented) is still picked up by the next dequeue a few ms later.
+constexpr u64 EVENT_SLICE_NS = 4000000ULL;        // 4 ms
+
+// Minimum spacing between dequeue attempts whenever a wait returned at once,
+// so the loop can never turn into a busy spin of binder IPCs.
+constexpr u64 MIN_RETRY_NS = 1000000ULL;          // 1 ms
+
+// Budget for the release fence of a dequeued buffer, all fences together.
+constexpr s64 FENCE_TIMEOUT_US = 20000;           // 20 ms
+
+constexpr Result RESULT_WOULD_BLOCK = MAKERESULT(Module_LibnxBinder, LibnxBinderError_WouldBlock);
+
+// What nvFenceWait() returns when the fence did not signal in time (libnx
+// fence.c). Any other failure means the wait itself is broken.
+constexpr Result RESULT_FENCE_TIMEOUT = MAKERESULT(Module_LibnxNvidia, LibnxNvidiaError_Timeout);
 
 // Cleans + invalidates the cache lines of every GOB (32x8 px, 512 B) that
 // overlaps `r`. Every CPU write to a slot happens inside such a rectangle
@@ -61,9 +90,12 @@ Renderer::Renderer()
     , m_nwin_ok(false)
     , m_fb_ok(false)
     , m_in_captures(false)
+    , m_unscaled(false)
     , m_underscan_z(false)
     , m_normal_z(0)
     , m_soft_rc(0)
+    , m_info{}
+    , m_stats{}
 {
     std::memset(&m_display, 0, sizeof(m_display));
     std::memset(&m_layer, 0, sizeof(m_layer));
@@ -102,15 +134,21 @@ Result Renderer::update_z() {
     if (active == m_underscan_z) return 0;
 
     // On failure m_underscan_z is left as is, so the next call retries.
-    Result rc = viSetLayerZ(&m_layer, active ? UNDERSCAN_Z : m_normal_z);
-    if (R_SUCCEEDED(rc)) m_underscan_z = active;
+    const s32 z = active ? UNDERSCAN_Z : m_normal_z;
+    Result rc = viSetLayerZ(&m_layer, z);
+    if (R_SUCCEEDED(rc)) {
+        m_underscan_z = active;
+        m_info.z = z;
+        m_info.underscan = active;
+    }
     return rc;
 }
 
-Result Renderer::init(bool show_in_captures, KinestopStage& stage) {
+Result Renderer::init(bool show_in_captures, bool unscaled, KinestopStage& stage) {
     if (m_fb_ok) return 0;
     teardown();  // clean slate if a previous attempt got partway
     m_soft_rc = 0;
+    m_info = LayerInfo{};
 
     Result rc;
 
@@ -138,13 +176,19 @@ Result Renderer::init(bool show_in_captures, KinestopStage& stage) {
     if (R_FAILED(rc)) goto fail;
 
     {
-        s32 z_max = 0;
-        if (R_SUCCEEDED(viGetZOrderCountMax(&m_display, &z_max)) && z_max > 0)
+        s32 z_min = 0, z_max = 0;
+        m_info.z_min = R_SUCCEEDED(viGetZOrderCountMin(&m_display, &z_min)) ? z_min : -1;
+        if (R_SUCCEEDED(viGetZOrderCountMax(&m_display, &z_max)) && z_max > 0) {
             m_normal_z = z_max - 1;
-        else
+            m_info.z_max = z_max;
+        } else {
             m_normal_z = 254;  // libtesla falls back to 255 for itself
+            m_info.z_max = -1;
+        }
         m_underscan_z = underscan_active();
-        rc = viSetLayerZ(&m_layer, m_underscan_z ? UNDERSCAN_Z : m_normal_z);
+        m_info.z = m_underscan_z ? UNDERSCAN_Z : m_normal_z;
+        m_info.underscan = m_underscan_z;
+        rc = viSetLayerZ(&m_layer, m_info.z);
         if (R_FAILED(rc)) goto fail;
     }
 
@@ -163,7 +207,9 @@ Result Renderer::init(bool show_in_captures, KinestopStage& stage) {
     m_in_captures = show_in_captures;
 
     stage = KinestopStage_Layer;
-    rc = viSetLayerSize(&m_layer, LAYER_WIDTH, LAYER_HEIGHT);
+    m_info.width = unscaled ? UNSCALED_LAYER_WIDTH : LAYER_WIDTH;
+    m_info.height = unscaled ? UNSCALED_LAYER_HEIGHT : LAYER_HEIGHT;
+    rc = viSetLayerSize(&m_layer, m_info.width, m_info.height);
     if (R_FAILED(rc)) goto fail;
     rc = viSetLayerPosition(&m_layer, 0.0f, 0.0f);
     if (R_FAILED(rc)) goto fail;
@@ -185,6 +231,9 @@ Result Renderer::init(bool show_in_captures, KinestopStage& stage) {
     armDCacheFlush(m_fb.buf, (size_t)m_fb.fb_size * NUM_FBS);
     std::memset(m_dirty_count, 0, sizeof(m_dirty_count));
 
+    m_unscaled = unscaled;
+    m_info.in_captures = show_in_captures;
+    m_info.unscaled = unscaled;
     stage = KinestopStage_None;
     return 0;
 
@@ -201,27 +250,141 @@ raster::Surface Renderer::surface_for_slot(s32 slot) {
     };
 }
 
-// Dequeues a slot, replaces last time's dots in it with `frame` (or with
-// nothing when frame is null) and queues it. `presented` is false when no
-// buffer was released within DEQUEUE_TIMEOUT_NS; nothing was touched then.
+// nwindowDequeueBuffer() with a deadline. Same NWindow bookkeeping (mutex,
+// cur_slot, slots_requested/bqRequestBuffer, cancel on failure), but the
+// waiting follows bounded_dequeue.hpp (host-tested in tests/test_dequeue.cpp):
+//   * the async dequeue is retried until DEQUEUE_DEADLINE_NS, waiting on the
+//     release event in slices (never longer than what is left), resetting it
+//     before each wait, and never faster than once per MIN_RETRY_NS;
+//   * the release fences share one FENCE_TIMEOUT_US budget, and a buffer
+//     whose fence does not signal in time is cancelled again (with that
+//     fence, so the next dequeue of the slot waits for it). A fence wait that
+//     fails with anything but a timeout is counted and the buffer is used
+//     anyway, as libnx does.
+// Returns 0 with out_slot >= 0 (the slot is now nw->cur_slot and must be
+// queued or cancelled), 0 with out_slot = -1 when it gave up (counted in
+// m_stats.dequeue_timeouts), or a failure Result.
+namespace {
+
+// The libnx side of bounded::dequeue_until_deadline() / wait_fences().
+// Called with nw->mutex held.
+struct DequeueOps {
+    NWindow* nw;
+    s32 slot;
+    NvMultiFence fence;
+    Result rc;        // last bqDequeueBuffer() Result
+    Result fence_rc;  // nvFenceWait() Result when it failed with something other than a timeout
+
+    u64 now_ns() { return armTicksToNs(armGetSystemTick()); }
+
+    bounded::Try try_dequeue() {
+        rc = bqDequeueBuffer(&nw->bq, true, nw->width, nw->height, nw->format, nw->usage, &slot, &fence);
+        if (R_SUCCEEDED(rc)) return bounded::Try::Got;
+        return R_VALUE(rc) == RESULT_WOULD_BLOCK ? bounded::Try::WouldBlock : bounded::Try::Failed;
+    }
+
+    bool has_event() { return eventActive(&nw->event); }
+    void clear_event() { eventClear(&nw->event); }
+    bool wait_event(u64 ns) { return R_SUCCEEDED(eventWait(&nw->event, ns)); }
+    void sleep_ns(u64 ns) { svcSleepThread((s64)ns); }
+
+    bounded::Fence fence_wait(u32 index, s32 timeout_us) {
+        const Result r = nvFenceWait(&fence.fences[index], timeout_us);
+        if (R_SUCCEEDED(r)) return bounded::Fence::Signalled;
+        if (R_VALUE(r) == RESULT_FENCE_TIMEOUT) return bounded::Fence::TimedOut;
+        fence_rc = r;
+        return bounded::Fence::Failed;
+    }
+};
+
+constexpr bounded::Timing DEQUEUE_TIMING = {DEQUEUE_DEADLINE_NS, EVENT_SLICE_NS, MIN_RETRY_NS};
+
+} // namespace
+
+Result Renderer::dequeue_bounded(s32& out_slot) {
+    out_slot = -1;
+    NWindow* nw = &m_window;
+
+    mutexLock(&nw->mutex);
+
+    if (!nw->slots_configured || nw->cur_slot >= 0) {
+        mutexUnlock(&nw->mutex);
+        return MAKERESULT(Module_Libnx, LibnxError_BadGfxDequeueBuffer);
+    }
+
+    DequeueOps ops;
+    ops.nw = nw;
+    ops.slot = -1;
+    std::memset(&ops.fence, 0, sizeof(ops.fence));
+    ops.rc = 0;
+    ops.fence_rc = 0;
+
+    bounded::Counters counters = {0, 0};
+    const bounded::Outcome outcome = bounded::dequeue_until_deadline(ops, DEQUEUE_TIMING, counters);
+    m_stats.would_blocks += counters.would_blocks;
+    m_stats.event_wakes += counters.event_wakes;
+
+    if (outcome == bounded::Outcome::TimedOut) {
+        m_stats.dequeue_timeouts++;
+        mutexUnlock(&nw->mutex);
+        return 0;
+    }
+    if (outcome == bounded::Outcome::Failed) {
+        mutexUnlock(&nw->mutex);
+        return ops.rc;
+    }
+
+    const s32 slot = ops.slot;
+    if (slot < 0 || (u32)slot >= NUM_FBS) {
+        // Cannot happen with framebufferCreate(..., NUM_FBS); be defensive.
+        if (slot >= 0 && slot < 64) bqCancelBuffer(&nw->bq, slot, &ops.fence);
+        mutexUnlock(&nw->mutex);
+        return MAKERESULT(Module_Libnx, LibnxError_BadGfxDequeueBuffer);
+    }
+
+    if (!(nw->slots_requested & (1UL << slot))) {
+        Result rc = bqRequestBuffer(&nw->bq, slot, NULL);
+        if (R_FAILED(rc)) {
+            bqCancelBuffer(&nw->bq, slot, &ops.fence);
+            mutexUnlock(&nw->mutex);
+            return rc;
+        }
+        nw->slots_requested |= 1UL << slot;
+    }
+
+    const u32 num_fences = ops.fence.num_fences < 4 ? ops.fence.num_fences : 4;
+    const bounded::Fence fence_state = bounded::wait_fences(ops, num_fences, FENCE_TIMEOUT_US);
+    if (fence_state == bounded::Fence::Failed) {
+        // The wait itself failed (not a timeout). Do what libnx's
+        // nwindowDequeueBuffer() does - ignore it and use the buffer - but
+        // count it and keep the Result for the diagnostics line.
+        m_stats.fence_errors++;
+        m_stats.last_fence_rc = ops.fence_rc;
+    } else if (fence_state == bounded::Fence::TimedOut) {
+        // Abandon this present. The slot goes back to the queue with the
+        // fence still pending; nw->cur_slot was never set.
+        m_stats.fence_timeouts++;
+        m_stats.dequeue_timeouts++;
+        const Result rc = bqCancelBuffer(&nw->bq, slot, &ops.fence);
+        mutexUnlock(&nw->mutex);
+        return rc;  // 0 = skipped; a failed cancel leaves the queue unknown: re-create
+    }
+
+    nw->cur_slot = slot;
+    out_slot = slot;
+    mutexUnlock(&nw->mutex);
+    return 0;
+}
+
+// Dequeues a slot (bounded), replaces last time's dots in it with `frame` (or
+// with nothing when frame is null) and queues it. `presented` is false when no
+// usable buffer was handed out in time; nothing was touched then.
 Result Renderer::draw_slot(const DotFrame* frame, bool& presented) {
     presented = false;
 
-    // nwindowDequeueBuffer() loops on eventWait(UINT64_MAX) until a buffer
-    // is free. Wait here first with a timeout so a compositor that stops
-    // releasing our buffers cannot block the main loop (and with it Exit).
-    // The event is remote and loaded with autoclear=false (binder.c), so
-    // this wait does not consume the signal the dequeue then waits for.
-    if (eventActive(&m_window.event) && R_FAILED(eventWait(&m_window.event, DEQUEUE_TIMEOUT_NS)))
-        return 0;
-
     s32 slot = -1;
-    Result rc = nwindowDequeueBuffer(&m_window, &slot, nullptr);
-    if (R_FAILED(rc)) return rc;
-    if (slot < 0 || (u32)slot >= NUM_FBS) {
-        // Cannot happen with framebufferCreate(..., NUM_FBS); be defensive.
-        return MAKERESULT(Module_Libnx, LibnxError_BadGfxDequeueBuffer);
-    }
+    Result rc = dequeue_bounded(slot);
+    if (R_FAILED(rc) || slot < 0) return rc;
 
     const raster::Surface surface = surface_for_slot(slot);
 
@@ -244,8 +407,15 @@ Result Renderer::draw_slot(const DotFrame* frame, bool& presented) {
     }
 
     rc = nwindowQueueBuffer(&m_window, slot, nullptr);
-    if (R_SUCCEEDED(rc)) presented = true;
-    return rc;
+    if (R_FAILED(rc)) {
+        // Hand the slot back so the window stays consistent (cur_slot = -1);
+        // otherwise every later dequeue fails with BadGfxDequeueBuffer. The
+        // dirty list above already describes what is in the slot now.
+        nwindowCancelBuffer(&m_window, slot, nullptr);
+        return rc;
+    }
+    presented = true;
+    return 0;
 }
 
 Result Renderer::present(const DotFrame& frame, KinestopStage& stage, bool& presented) {
@@ -262,7 +432,7 @@ Result Renderer::present(const DotFrame& frame, KinestopStage& stage, bool& pres
 void Renderer::exit() {
     if (m_fb_ok) {
         // Leave nothing on screen even for the instant before the layer goes.
-        // Skipped (bounded wait) if the compositor is not releasing buffers.
+        // Skipped (bounded) if the compositor is not releasing buffers.
         bool presented;
         draw_slot(nullptr, presented);
     }
@@ -302,6 +472,7 @@ void Renderer::teardown() {
         m_vi_ok = false;
     }
     m_in_captures = false;
+    m_unscaled = false;
     m_underscan_z = false;
     std::memset(m_dirty_count, 0, sizeof(m_dirty_count));
 }

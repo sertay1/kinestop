@@ -25,7 +25,7 @@ extern "C" {
 /* SM service name. Must be <= 8 bytes (smEncodeName + ovl-sysmodules limit). */
 #define KINESTOP_SERVICE_NAME    "kinestop"
 
-#define KINESTOP_API_VERSION     1
+#define KINESTOP_API_VERSION     2
 
 typedef enum {
     /* void -> uint32_t (KINESTOP_API_VERSION) */
@@ -43,7 +43,17 @@ typedef enum {
      * orientation as the new zero, applies it, and returns the offsets so the
      * overlay can persist them. */
     KinestopCmd_Calibrate     = 4,
+    /* uint8_t (bool) -> void. true: tear the VI layer down completely (frees
+     * the framebuffers, keeps sampling the IMU) so another overlay's layer can
+     * be shown; false: bring it back. The Kinestop overlay suspends while its
+     * panel is visible. Not persisted; a fresh process starts unsuspended. */
+    KinestopCmd_SetSuspended  = 5,
 } KinestopCmd;
+
+/* KinestopWireConfig.debug_flags */
+#define KINESTOP_DEBUG_BLINK_TEST     (1u << 0)  /* layer down 3 s out of every 10 s */
+#define KINESTOP_DEBUG_UNSCALED_LAYER (1u << 1)  /* 1:1 test layer: 640x360 fb in a 960x540 (VI units) layer, top-left quarter */
+#define KINESTOP_DEBUG_VERBOSE_LOG    (1u << 2)  /* 1 Hz diagnostics line in sysmodule.log */
 
 /* Mirror of kinestop::Config that the renderer needs. Index fields use the
  * same meaning as config.ini (see common/config.hpp). */
@@ -57,7 +67,8 @@ typedef struct {
     uint8_t    invert_roll;        /* bool */
     uint8_t    show_in_captures;   /* bool: also add the layer to screenshot/recording stacks */
     uint16_t   poll_rate_hz;       /* render/sample rate, clamped 10..120 by the sysmodule */
-    uint8_t    reserved[2];
+    uint8_t    debug_flags;        /* KINESTOP_DEBUG_* (test builds) */
+    uint8_t    reserved;
     float opacity;            /* 0.10 .. 1.0 */
     float filter_alpha;       /* 0.50 .. 0.97 */
     float deadzone_deg;       /* 0.0 .. 5.0 */
@@ -69,7 +80,15 @@ typedef struct {
 
 /* Bits of KinestopStatus.flags */
 #define KINESTOP_STATUS_LAYER_OK   (1u << 0)  /* VI layer + framebuffer are up */
-#define KINESTOP_STATUS_SENSOR_OK  (1u << 1)  /* at least one six-axis sample received recently */
+#define KINESTOP_STATUS_SENSOR_OK  (1u << 1)  /* a sensor sample with an ADVANCING sampling number within the last 0.5 s */
+#define KINESTOP_STATUS_SUSPENDED  (1u << 2)  /* layer deliberately down (SetSuspended or blink test) */
+
+/* KinestopStatus.sensor_source */
+typedef enum {
+    KinestopSensor_None        = 0,
+    KinestopSensor_SevenSixAxis = 1,  /* console IMU via hidInitializeSevenSixAxisSensor */
+    KinestopSensor_NpadSixAxis = 2,   /* npad six-axis (handheld / controller) */
+} KinestopSensorSource;
 
 typedef struct {
     uint32_t   api_version;
@@ -78,8 +97,15 @@ typedef struct {
     float roll_deg;
     uint32_t   last_error_rc;      /* most recent failing libnx/HOS Result; reset to 0 once that stage recovers */
     uint32_t   last_error_stage;   /* KinestopStage of last_error_rc */
-    uint32_t   frames_presented;   /* wraps; lets the overlay see the loop is alive */
-    uint32_t   reserved;
+    uint32_t   frames_presented;   /* wraps */
+    uint32_t   loop_iterations;    /* main-loop heartbeat, published at the TOP of each iteration (wraps) */
+    uint32_t   sensor_source;      /* KinestopSensorSource currently used */
+    uint32_t   sensor_advance_1s;  /* sampling-number advance of the chosen source over the last second */
+    uint32_t   dequeue_timeouts;   /* presents abandoned because no buffer was free in time (wraps) */
+    uint32_t   max_present_us;     /* longest present() over the last second, microseconds */
+    uint32_t   layer_inits;        /* successful layer creations since start (wraps) */
+    uint32_t   seven_init_rc;      /* SevenSixAxis: failing initialize Result, else the latest start Result (kept current); 0 = started */
+    uint32_t   reserved[2];
 } KinestopStatus;
 
 typedef enum {
@@ -100,11 +126,11 @@ typedef struct {
 
 #ifdef __cplusplus
 static_assert(sizeof(KinestopWireConfig) == 40, "KinestopWireConfig layout changed: bump KINESTOP_API_VERSION");
-static_assert(sizeof(KinestopStatus) == 32, "KinestopStatus layout changed: bump KINESTOP_API_VERSION");
+static_assert(sizeof(KinestopStatus) == 64, "KinestopStatus layout changed: bump KINESTOP_API_VERSION");
 static_assert(sizeof(KinestopCalibration) == 8, "KinestopCalibration layout changed: bump KINESTOP_API_VERSION");
 #else
 _Static_assert(sizeof(KinestopWireConfig) == 40, "KinestopWireConfig layout changed: bump KINESTOP_API_VERSION");
-_Static_assert(sizeof(KinestopStatus) == 32, "KinestopStatus layout changed: bump KINESTOP_API_VERSION");
+_Static_assert(sizeof(KinestopStatus) == 64, "KinestopStatus layout changed: bump KINESTOP_API_VERSION");
 _Static_assert(sizeof(KinestopCalibration) == 8, "KinestopCalibration layout changed: bump KINESTOP_API_VERSION");
 #endif
 

@@ -7,13 +7,16 @@
 // pmshellLaunchProgram and talks to it over the "kinestop" service
 // (common/kinestop_ipc.h).
 //
-// Threads:
+// Threads (both on core 3, both BELOW nx-ovlloader's main/render thread,
+// which runs at priority 49 on core 3, so a Tesla menu always preempts us):
 //   main  - sample IMU, filter, compute dot positions, present (paced to
-//           poll_rate_hz); owns the renderer and the sensor.
-//   ipc   - serves the "kinestop" service; touches only g_state.
+//           poll_rate_hz); owns the renderer and the sensor. Priority 59
+//           (kinestop.json main_thread_priority).
+//   ipc   - serves the "kinestop" service; touches only g_state. Priority 58.
 
 #include <switch.h>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 #include "../../common/kinestop_ipc.h"
@@ -27,7 +30,7 @@
 #include "sensor.hpp"
 
 #ifndef APP_VERSION
-#define APP_VERSION "2.0.0"
+#define APP_VERSION "2.0.0-test.2"
 #endif
 
 // ---------------------------------------------------------------------------
@@ -35,6 +38,14 @@
 //
 // The inner heap is a static array in .bss. Reading libnx (nx/source), these
 // are the only allocations made from it in this process:
+//   hidInitializeSevenSixAxisSensor()
+//                         console IMU state buffer handed to hid as
+//                         transfer memory, 0x80000 B,
+//                         __libnx_aligned_alloc(0x1000)             524,288 B
+//                         (allocated first, by SensorManager::init(), and
+//                         kept for the life of the process, so the
+//                         framebuffers below come and go after it and
+//                         cannot fragment around it)
 //   framebufferCreate()   640x360 RGBA4444: stride 1280 B, height padded to
 //                         384 rows -> 491,520 B/slot x 2 =       983,040 B
 //                         (__libnx_aligned_alloc(0x1000), up to 4 KiB lost
@@ -49,16 +60,17 @@
 //   fsdev                 cwd buffer disabled (__nx_fsdev_support_cwd)   0 B
 // vi, binder/parcels, nvmap, nvfence, hid and sm allocate nothing from the
 // heap (parcels live on the stack; hid maps its 0x40000 shared memory into
-// address space owned by hid). Sum ~1.09 MiB; the rest of the 1.25 MiB is
+// address space owned by hid). Sum ~1.59 MiB; the rest of the 1.75 MiB is
 // slack for malloc headers, fragmentation across layer re-creation
-// (framebuffers + nv transfer memory are freed and re-allocated) and the
-// 4 KiB memalign over-allocation.
+// (framebuffers + nv transfer memory are freed and re-allocated on every
+// suspend/resume, blink cycle or layer re-creation) and the 4 KiB memalign
+// over-allocations.
 // Not heap: main thread stack (npdm main_thread_stack_size 0x4000).
 // ---------------------------------------------------------------------------
-#define INNER_HEAP_SIZE 0x140000  // 1.25 MiB
+#define INNER_HEAP_SIZE 0x1C0000  // 1.75 MiB (1.25 MiB + 0x80000 for SevenSixAxis)
 
 #define IPC_THREAD_STACK_SIZE 0x2000
-#define IPC_THREAD_PRIORITY   44
+#define IPC_THREAD_PRIORITY   58  // below nx-ovlloader's 49; main thread is 59
 #define IPC_THREAD_CORE       3
 #define IPC_MAX_SESSIONS      4
 
@@ -136,6 +148,7 @@ struct SharedState {
     Orientation raw;         // latest filter output, before calibration
     KinestopStatus status;
     bool exit_requested;
+    bool suspended;          // SetSuspended: layer torn down, sampling continues
     UEvent wake;             // wakes the render loop early (Exit, SetConfig)
 };
 
@@ -200,6 +213,18 @@ Result ipc_handler(void* userdata, const IpcServerRequest* r, u8* out_data, size
             kinestop::log::write("Exit requested over IPC");
             request_exit();
             return 0;
+
+        case KinestopCmd_SetSuspended: {
+            if (!r->data.ptr || r->data.size < sizeof(u8))
+                return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+            const bool suspend = *static_cast<const u8*>(r->data.ptr) != 0;
+            // Acted on (and logged) by the render loop on its next tick.
+            mutexLock(&g_state.mutex);
+            g_state.suspended = suspend;
+            mutexUnlock(&g_state.mutex);
+            ueventSignal(&g_state.wake);
+            return 0;
+        }
 
         case KinestopCmd_Calibrate: {
             KinestopCalibration cal;
@@ -353,11 +378,48 @@ int clamp_rate(int hz) {
     return hz < 10 ? 10 : (hz > 120 ? 120 : hz);
 }
 
+// --- diagnostics ----------------------------------------------------------
+
+// log::write() formats with vsniprintf (no floating point, keeps the binary
+// small), so floats are logged as fixed point text.
+struct FixedText {
+    char text[16];
+};
+
+FixedText fixed(float v, int decimals) {
+    FixedText f;
+    if (!std::isfinite(v)) {
+        std::strcpy(f.text, "nan");
+        return f;
+    }
+    long scale = 1;
+    for (int i = 0; i < decimals; ++i) scale *= 10;
+    const float scaled = v * (float)scale;
+    if (scaled > 2e9f || scaled < -2e9f) {
+        std::strcpy(f.text, scaled > 0 ? "big" : "-big");
+        return f;
+    }
+    long q = lroundf(scaled);
+    const bool neg = q < 0;
+    if (neg) q = -q;
+    sniprintf(f.text, sizeof(f.text), "%s%ld.%0*ld", neg ? "-" : "", q / scale, decimals, q % scale);
+    return f;
+}
+
+// Seconds since start with one decimal, for log timestamps.
+FixedText seconds(u64 ms) {
+    FixedText f;
+    sniprintf(f.text, sizeof(f.text), "%lu.%lu", (unsigned long)(ms / 1000), (unsigned long)((ms % 1000) / 100));
+    return f;
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
     (void)argc;
     (void)argv;
+
+    const u64 start_tick = armGetSystemTick();
 
     kinestop::log::init();
     kinestop::log::write("Kinestop sysmodule " APP_VERSION " started (hos %u.%u.%u)",
@@ -366,6 +428,11 @@ int main(int argc, char* argv[]) {
     Config config;
     if (!config.load())
         kinestop::log::write("config.ini not found, using defaults");
+    if (config.general.debug_flags)
+        kinestop::log::write("debug_flags %d (blink %d, unscaled %d, verbose %d)", config.general.debug_flags,
+                             (config.general.debug_flags & KINESTOP_DEBUG_BLINK_TEST) ? 1 : 0,
+                             (config.general.debug_flags & KINESTOP_DEBUG_UNSCALED_LAYER) ? 1 : 0,
+                             (config.general.debug_flags & KINESTOP_DEBUG_VERBOSE_LOG) ? 1 : 0);
 
     // general.enabled is not checked: it is the overlay's master-toggle
     // state. Being launched at all (overlay, boot2.flag, or a sysmodule
@@ -377,6 +444,7 @@ int main(int argc, char* argv[]) {
     g_state.config = config;
     g_state.config_gen = 1;
     g_state.exit_requested = false;
+    g_state.suspended = false;  // a fresh process always starts unsuspended
     ueventCreate(&g_state.wake, true);
 
     Result rc = ipcServerInit(&g_server, KINESTOP_SERVICE_NAME, IPC_MAX_SESSIONS);
@@ -399,9 +467,14 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
+    // The sensor goes before the renderer: SevenSixAxis takes a long-lived
+    // 0x80000-byte block of the heap, the framebuffers come and go after it.
     kinestop::SensorManager sensor;
     rc = sensor.init();
     if (R_FAILED(rc)) record_error(KinestopStage_Sensor, rc);
+    mutexLock(&g_state.mutex);
+    g_state.status.seven_init_rc = sensor.seven_init_rc();
+    mutexUnlock(&g_state.mutex);
 
     kinestop::ComplementaryFilter filter;
     kinestop::Renderer renderer;
@@ -412,30 +485,95 @@ int main(int argc, char* argv[]) {
     FrameKey last_key{};
     bool have_key = false;
     u32 frames = 0;
+    u32 iterations = 0;
+    u32 layer_inits = 0;
 
     const u64 tick_freq = armGetSystemTickFreq();
     const u64 retry_ticks = tick_freq;        // VI init retry period: 1 s
     const u64 slow_ticks = tick_freq;         // underscan / sensor restart: 1 s
     const u64 sensor_fresh_ticks = tick_freq / 2;
+    const u64 sparse_log_ticks = tick_freq * 10;
+    constexpr u64 DENSE_LOG_MS = 60000;       // 1 Hz diagnostics for the first minute
+    constexpr u64 BLINK_PERIOD_MS = 10000;    // KINESTOP_DEBUG_BLINK_TEST: layer down
+    constexpr u64 BLINK_UP_MS = 7000;         // for the last 3 s of every 10 s
 
-    u64 last_tick = armGetSystemTick();
+    auto ms_since_start = [&](u64 tick) -> u64 { return armTicksToNs(tick - start_tick) / 1000000ULL; };
+
     u64 next_vi_retry = 0;
-    u64 next_slow = last_tick + slow_ticks;
+    u64 next_slow = start_tick + slow_ticks;
+    u64 next_second = start_tick + tick_freq;
+    u64 next_sparse_log = 0;
     u64 last_sample_tick = 0;
     bool have_sample = false;
     bool had_sensor_ok = false;
     bool z_failed = false;
 
+    bool suspended = false;
+    bool blink_down = false;
+    KinestopSensorSource source = KinestopSensor_None;
+    s8 npad_index = -1;                       // npad handle of the last NpadSixAxis sample
+    u32 seen_sources = 0;                     // bit per KinestopSensorSource already logged
+    kinestop::SensorSample last_sample{};
+
+    // Per-second accumulators and the values of the last full second.
+    u32 advance_acc = 0;
+    u32 switches_acc = 0;
+    u32 max_present_acc = 0;
+    u32 max_busy_acc = 0;                     // longest iteration before the pacing wait (incl. log I/O)
+    u32 advance_1s = 0;
+    u32 switches_1s = 0;
+    u32 max_present_1s = 0;
+    u32 max_busy_1s = 0;
+    kinestop::SensorWindow window_1s{0, 0, -1};
+
+    bool sensor_ok = false;
+
+    // One diagnostics line: everything needed to tell a frozen sensor, a
+    // stalled present and a layer that is not composited apart.
+    auto log_diag = [&](u64 now) {
+        const kinestop::PresentStats& ps = renderer.stats();
+        const bool stub = last_sample.accel.x == 0.0f && last_sample.accel.y == 0.0f &&
+                          last_sample.accel.z == -1.0f && last_sample.gyro.x == 0.0f &&
+                          last_sample.gyro.y == 0.0f && last_sample.gyro.z == 0.0f;
+        const char* layer = renderer.ready() ? "up" : suspended ? "suspended" : blink_down ? "blink" : "down";
+        kinestop::log::write(
+            "diag t=%s it=%u src=%s ok=%d adv=%u s7=%u np=%u/%d sw=%u a=%s,%s,%s g=%s,%s,%s%s p=%s r=%s "
+            "fr=%u dqto=%u fto=%u fe=%u/0x%X wb=%u ew=%u maxp=%uus maxit=%uus logw=%uus layer=%s",
+            seconds(ms_since_start(now)).text, (unsigned)iterations,
+            kinestop::SensorManager::source_name(source), sensor_ok ? 1 : 0, (unsigned)advance_1s,
+            (unsigned)window_1s.seven_advance, (unsigned)window_1s.npad_advance, (int)window_1s.npad_index,
+            (unsigned)switches_1s,
+            fixed(last_sample.accel.x, 3).text, fixed(last_sample.accel.y, 3).text, fixed(last_sample.accel.z, 3).text,
+            fixed(last_sample.gyro.x, 3).text, fixed(last_sample.gyro.y, 3).text, fixed(last_sample.gyro.z, 3).text,
+            stub ? " STUB" : "", fixed(ori.pitch_deg, 1).text, fixed(ori.roll_deg, 1).text,
+            (unsigned)frames, (unsigned)ps.dequeue_timeouts, (unsigned)ps.fence_timeouts,
+            (unsigned)ps.fence_errors, (unsigned)ps.last_fence_rc,
+            (unsigned)ps.would_blocks, (unsigned)ps.event_wakes, (unsigned)max_present_1s,
+            (unsigned)max_busy_1s, kinestop::log::take_max_write_us(), layer);
+    };
+
+    // Takes the layer down on purpose (suspend, blink test, settings change).
+    auto layer_down = [&](u64 now, const char* why) {
+        renderer.exit();
+        have_key = false;
+        kinestop::log::write("t=%s layer down (%s)", seconds(ms_since_start(now)).text, why);
+        log_diag(now);
+    };
+
     kinestop::log::write("running");
 
     while (true) {
         const u64 frame_start = armGetSystemTick();
-        const float dt = (float)armTicksToNs(frame_start - last_tick) / 1e9f;
-        last_tick = frame_start;
+        const u64 t_ms = ms_since_start(frame_start);
 
-        // Snapshot the config the IPC thread may have replaced.
+        // Heartbeat first, so a loop stuck further down (e.g. in present)
+        // shows up as a counter that stops. Then snapshot what the IPC
+        // thread may have changed.
+        ++iterations;
         mutexLock(&g_state.mutex);
+        g_state.status.loop_iterations = iterations;
         const bool quit = g_state.exit_requested;
+        const bool want_suspend = g_state.suspended;
         if (g_state.config_gen != local_gen) {
             local = g_state.config;
             local_gen = g_state.config_gen;
@@ -443,37 +581,88 @@ int main(int argc, char* argv[]) {
         mutexUnlock(&g_state.mutex);
         if (quit) break;
 
-        // IMU -> complementary filter (dt is clamped inside update()).
-        kinestop::Vec3f accel, gyro;
-        if (sensor.sample(accel, gyro)) {
-            ori = filter.update(accel, gyro, dt, local);
+        const u32 dbg = (u32)local.general.debug_flags;
+
+        // --- deliberate layer-down states -----------------------------------
+        if (want_suspend != suspended) {
+            suspended = want_suspend;
+            kinestop::log::write("t=%s %s", seconds(t_ms).text,
+                                 suspended ? "suspend: tearing the layer down, sampling continues"
+                                           : "resume: re-creating the layer");
+            if (!suspended) next_vi_retry = 0;
+        }
+
+        const bool blink_now = (dbg & KINESTOP_DEBUG_BLINK_TEST) && (t_ms % BLINK_PERIOD_MS) >= BLINK_UP_MS;
+        if (blink_now != blink_down) {
+            blink_down = blink_now;
+            kinestop::log::write("t=%s blink: layer %s", seconds(t_ms).text, blink_down ? "down for 3 s" : "back up");
+            if (!blink_down) next_vi_retry = 0;
+        }
+
+        const bool want_layer = !suspended && !blink_down;
+
+        // --- IMU -> complementary filter ------------------------------------
+        kinestop::SensorSample smp;
+        if (sensor.sample(smp)) {
+            if (smp.source != source || smp.npad_index != npad_index) {
+                // A change of source, or of npad handle, is a switch.
+                if (source != KinestopSensor_None) switches_acc++;
+                npad_index = smp.npad_index;
+                if (!(seen_sources & (1u << smp.source))) {
+                    seen_sources |= 1u << smp.source;
+                    kinestop::log::write("t=%s first fresh sample from %s", seconds(t_ms).text,
+                                         kinestop::SensorManager::source_name(smp.source));
+                }
+                source = smp.source;
+            }
+            // dt since the previous fresh sample, so gyro integration covers
+            // ticks without one (clamped inside update()).
+            const float dt = have_sample ? (float)armTicksToNs(frame_start - last_sample_tick) / 1e9f : 0.0f;
+            ori = filter.update(smp.accel, smp.gyro, dt, local);
             last_sample_tick = frame_start;
             have_sample = true;
+            last_sample = smp;
+            advance_acc += smp.advance;
         }
-        const bool sensor_ok = have_sample && (frame_start - last_sample_tick) < sensor_fresh_ticks;
+        sensor_ok = have_sample && (frame_start - last_sample_tick) < sensor_fresh_ticks;
         if (sensor_ok && !had_sensor_ok) clear_error_if(is_sensor_stage);
         had_sensor_ok = sensor_ok;
 
-        // Layer stack membership is fixed when the layer is created.
-        if (renderer.ready() && renderer.in_captures() != local.visual.show_in_captures) {
-            kinestop::log::write("show_in_captures -> %d, re-creating layer", local.visual.show_in_captures ? 1 : 0);
-            renderer.exit();
+        // --- layer lifecycle ------------------------------------------------
+        if (!want_layer && renderer.ready())
+            layer_down(frame_start, suspended ? "suspended" : "blink test");
+
+        // Layer stack membership and size are fixed when the layer is created.
+        const bool want_unscaled = (dbg & KINESTOP_DEBUG_UNSCALED_LAYER) != 0;
+        if (renderer.ready() && (renderer.in_captures() != local.visual.show_in_captures ||
+                                 renderer.unscaled() != want_unscaled)) {
+            kinestop::log::write("show_in_captures %d / unscaled %d changed, re-creating layer",
+                                 local.visual.show_in_captures ? 1 : 0, want_unscaled ? 1 : 0);
+            layer_down(frame_start, "settings");
             next_vi_retry = 0;
         }
 
-        if (!renderer.ready() && frame_start >= next_vi_retry) {
+        if (want_layer && !renderer.ready() && frame_start >= next_vi_retry) {
             KinestopStage stage = KinestopStage_None;
-            rc = renderer.init(local.visual.show_in_captures, stage);
+            rc = renderer.init(local.visual.show_in_captures, want_unscaled, stage);
             z_failed = false;  // a new layer gets its Z from init()
             if (R_FAILED(rc)) {
                 record_error(stage, rc);
                 next_vi_retry = frame_start + retry_ticks;
             } else {
-                kinestop::log::write("layer up (captures=%d)", local.visual.show_in_captures ? 1 : 0);
+                layer_inits++;
+                const kinestop::LayerInfo& li = renderer.info();
+                kinestop::log::write("t=%s layer up #%u: %dx%d VI units at 0,0 (fb %ux%u), z %d (min %d max %d), "
+                                     "underscan %d, captures %d, unscaled %d",
+                                     seconds(t_ms).text, (unsigned)layer_inits, (int)li.width, (int)li.height,
+                                     (unsigned)kinestop::Renderer::FB_WIDTH, (unsigned)kinestop::Renderer::FB_HEIGHT,
+                                     (int)li.z, (int)li.z_min, (int)li.z_max, li.underscan ? 1 : 0,
+                                     li.in_captures ? 1 : 0, li.unscaled ? 1 : 0);
                 clear_error_if(is_vi_stage);
                 if (R_FAILED(renderer.last_soft_error()))
                     record_error(KinestopStage_LayerStack, renderer.last_soft_error());
                 have_key = false;  // fresh buffers: present unconditionally
+                log_diag(frame_start);
             }
         }
 
@@ -482,6 +671,7 @@ int main(int argc, char* argv[]) {
             // A failed Z switch (e.g. docking with TV underscan set) is not
             // fatal - the dots still show - but it is reported, and cleared
             // once a retry succeeds.
+            const s32 z_before = renderer.info().z;
             const Result zrc = renderer.update_z();
             if (R_FAILED(zrc)) {
                 record_error(KinestopStage_Layer, zrc);
@@ -490,9 +680,13 @@ int main(int argc, char* argv[]) {
                 clear_error_if(is_layer_stage);
                 z_failed = false;
             }
+            if (renderer.ready() && renderer.info().z != z_before)
+                kinestop::log::write("t=%s z -> %d (underscan %d)", seconds(t_ms).text, (int)renderer.info().z,
+                                     renderer.info().underscan ? 1 : 0);
             sensor.retry_start();
         }
 
+        // --- present --------------------------------------------------------
         if (renderer.ready()) {
             const kinestop::dots::Point offset = kinestop::dots::compute_offset(ori, local);
             const FrameKey key{
@@ -507,14 +701,21 @@ int main(int argc, char* argv[]) {
 
                 KinestopStage stage = KinestopStage_None;
                 bool presented = false;
+                const u64 present_start = armGetSystemTick();
                 rc = renderer.present(frame, stage, presented);
+                const u64 present_us = armTicksToNs(armGetSystemTick() - present_start) / 1000ULL;
+                const u32 present_us32 = present_us > 0xFFFFFFFFull ? 0xFFFFFFFFu : (u32)present_us;
+                if (present_us32 > max_present_acc) max_present_acc = present_us32;
+
                 if (R_FAILED(rc)) {
                     record_error(stage, rc);
                     renderer.exit();
+                    kinestop::log::write("t=%s layer down (present failed, retry in 1 s)", seconds(t_ms).text);
+                    log_diag(frame_start);
                     next_vi_retry = frame_start + retry_ticks;
                     have_key = false;
                 } else if (!presented) {
-                    // No buffer released in time: last_key is unchanged, so
+                    // No usable buffer in time: last_key is unchanged, so
                     // the next iteration presents again.
                 } else {
                     last_key = key;
@@ -524,19 +725,53 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Publish status.
+        // --- once per second: windows, periodic diagnostics -----------------
+        const u64 now = armGetSystemTick();
+        if (now >= next_second) {
+            next_second += tick_freq;
+            if (next_second <= now) next_second = now + tick_freq;  // fell behind (long stall)
+
+            advance_1s = advance_acc;
+            switches_1s = switches_acc;
+            max_present_1s = max_present_acc;
+            max_busy_1s = max_busy_acc;
+            window_1s = sensor.take_window();
+            advance_acc = 0;
+            switches_acc = 0;
+            max_present_acc = 0;
+            max_busy_acc = 0;
+
+            const bool dense = (dbg & KINESTOP_DEBUG_VERBOSE_LOG) || ms_since_start(now) < DENSE_LOG_MS;
+            if (dense || now >= next_sparse_log) {
+                log_diag(now);
+                next_sparse_log = now + sparse_log_ticks;
+            }
+        }
+
+        // --- publish status -------------------------------------------------
         mutexLock(&g_state.mutex);
         g_state.raw = ori;
         g_state.status.flags = (renderer.ready() ? KINESTOP_STATUS_LAYER_OK : 0) |
-                               (sensor_ok ? KINESTOP_STATUS_SENSOR_OK : 0);
+                               (sensor_ok ? KINESTOP_STATUS_SENSOR_OK : 0) |
+                               ((suspended || blink_down) ? KINESTOP_STATUS_SUSPENDED : 0);
         g_state.status.pitch_deg = ori.pitch_deg;
         g_state.status.roll_deg = ori.roll_deg;
         g_state.status.frames_presented = frames;
+        g_state.status.sensor_source = sensor_ok ? (u32)source : (u32)KinestopSensor_None;
+        g_state.status.sensor_advance_1s = advance_1s;
+        g_state.status.dequeue_timeouts = renderer.stats().dequeue_timeouts;
+        g_state.status.max_present_us = max_present_1s;
+        g_state.status.layer_inits = layer_inits;
+        g_state.status.seven_init_rc = sensor.seven_init_rc();  // retry_start() may change it
         mutexUnlock(&g_state.mutex);
 
-        // Pace to poll_rate_hz; Exit/SetConfig/Calibrate wake us early.
+        // Pace to poll_rate_hz; Exit/SetConfig/Calibrate/SetSuspended wake us
+        // early.
         const u64 period_ns = 1000000000ULL / (u64)clamp_rate(local.general.poll_rate_hz);
         const u64 elapsed_ns = armTicksToNs(armGetSystemTick() - frame_start);
+        const u64 busy_us = elapsed_ns / 1000ULL;
+        const u32 busy_us32 = busy_us > 0xFFFFFFFFull ? 0xFFFFFFFFu : (u32)busy_us;
+        if (busy_us32 > max_busy_acc) max_busy_acc = busy_us32;
         if (elapsed_ns < period_ns)
             waitSingle(waiterForUEvent(&g_state.wake), period_ns - elapsed_ns);
     }
@@ -560,6 +795,8 @@ int main(int argc, char* argv[]) {
     ipcServerExit(&g_server);
 
     renderer.exit();
+    // Before __appExit's hidExit(), which aborts while a SevenSixAxis buffer
+    // is still registered.
     sensor.exit();
     kinestop::log::write("exited cleanly");
     return 0;
