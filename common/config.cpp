@@ -113,7 +113,7 @@ const char* bool_str(bool b) { return b ? "true" : "false"; }
 void Config::set_defaults() {
     general.poll_rate_hz = 60;
     general.language = 0; // 0: English, 1: Türkçe
-    general.console_sensor = false;
+    general.console_sensor = true;
 
     visual.style = 0;
     visual.color = 0;
