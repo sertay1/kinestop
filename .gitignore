@@ -1,0 +1,30 @@
+# build outputs
+build/
+*.elf
+*.nso
+*.nro
+*.map
+*.o
+*.d
+
+# packaging (make dist / make zip)
+sdcard/
+Kinestop.zip
+
+# host tests (make test)
+tests/build/
+tests/bin/
+tests/*_test
+tests/test_*
+!tests/test_*.cpp
+!tests/test_*.c
+!tests/test_*.py
+
+# overlay/kinestop.ovl and overlay/kinestop.nacp are prebuilt artifacts that
+# upstream commits, so they are intentionally NOT ignored here.
+
+__pycache__/
+*.pyc
+
+# hardware test logs
+*.log

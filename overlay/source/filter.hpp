@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../../common/math_types.hpp"
-#include "../../common/config.hpp"
+#include "math_types.hpp"
+#include "config.hpp"
 
 namespace kinestop {
 
