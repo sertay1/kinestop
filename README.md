@@ -68,7 +68,7 @@ You can download and install the application directly on your Switch via the HB 
 
 ---
 
-## 🌟 Special Thanks / Teşekkürler
+## 🌟 Special Thanks
 Special thanks to **[RandomTask-1](https://github.com/RandomTask-1)** for the 4MB Ultrahand memory optimization and display strategy contributions!
 
 ---
@@ -128,6 +128,11 @@ Uygulamayı doğrudan Switch üzerinden HB App Store aracılığıyla indirip ku
 5. **Menüye Dönüş / Çıkış:**
    - Noktalar ekrandayken UltraHand kısayoluna basarak noktaları durdurup Kinestop menüsüne dönebilirsiniz.
    - Menüdeyken **(B)** tuşuna basarak doğrudan UltraHand menüsüne çıkabilirsiniz.
+
+---
+
+## 🌟 Teşekkürler
+4 MB’lık Ultrahand bellek optimizasyonu ve görüntüleme stratejisi konusundaki katkıları için **[RandomTask-1](https://github.com/RandomTask-1)**’e özel teşekkürler!
 
 ---
 
