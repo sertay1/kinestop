@@ -100,6 +100,7 @@ all: $(OUTPUT).ovl
 $(OUTPUT).ovl: $(OUTPUT).elf $(OUTPUT).nacp
 	@elf2nro $< $@ $(NROFLAGS)
 	@echo "built ... $(notdir $@)"
+	@printf 'ULTR' >> $@
 
 # Regenerated when the Makefile (APP_VERSION) changes; kinestop.nacp is committed.
 $(OUTPUT).nacp: $(TOPDIR)/Makefile
