@@ -196,17 +196,13 @@ bool SensorManager::sample(SensorSample& out) {
     }
     m_last_call_tick = now;
 
-    // 1. SevenSixAxisSensor. Field mapping exactly as in the original v1
-    //    sensor: unk_x18[0..2] acceleration, [3..5] angular velocity,
-    //    normalised to G's when it looks like m/s^2.
-    bool seven_fresh = false;
-    SensorSample seven{};
+    // 1. SevenSixAxisSensor (Console Hardware IMU).
+    // Primary and continuous 60 FPS source, exactly like original Kinestop.
     if (m_seven_initialized) {
         HidSevenSixAxisSensorState st;
         std::memset(&st, 0, sizeof(st));
         size_t total = 0;
-        if (R_SUCCEEDED(hidGetSevenSixAxisSensorStates(&st, 1, &total)) && total > 0 &&
-            m_seven.update(st.sampling_number)) {
+        if (R_SUCCEEDED(hidGetSevenSixAxisSensorStates(&st, 1, &total)) && total > 0) {
             float ax = st.unk_x18[0];
             float ay = st.unk_x18[1];
             float az = st.unk_x18[2];
@@ -218,22 +214,16 @@ bool SensorManager::sample(SensorSample& out) {
                     ay /= 9.80665f;
                     az /= 9.80665f;
                 }
-                seven.accel = Vec3f(ax, ay, az);
-                seven.gyro = Vec3f(st.unk_x18[3], st.unk_x18[4], st.unk_x18[5]);
-                seven.source = SensorSource::SevenSixAxis;
-                seven_fresh = true;
+                out.accel = Vec3f(ax, ay, az);
+                out.gyro = Vec3f(st.unk_x18[3], st.unk_x18[4], st.unk_x18[5]);
+                out.source = SensorSource::SevenSixAxis;
+                m_current = SensorSource::SevenSixAxis;
                 m_seven_fresh_tick = now;
-                const float v[6] = {st.unk_x18[0], st.unk_x18[1], st.unk_x18[2],
-                                    st.unk_x18[3], st.unk_x18[4], st.unk_x18[5]};
-                if (values_changed(m_seven_prev, v)) m_seven_change_tick = now;
+                return true;
             }
         }
     }
-
-    // SevenSixAxis is streaming values that change: an npad handle that
-    // looks fake (stub pattern, or frozen) must not shut it out.
-    const bool seven_alive = within(m_seven_fresh_tick, SEVEN_HOLD_NS);
-    const bool seven_moving = seven_alive && within(m_seven_change_tick, NPAD_STUCK_NS);
+    const bool seven_moving = false;
 
     // 2. Npad handles, handheld first. All of them are read (and tracked)
     //    first; then the sample comes from the highest-priority handle HID
@@ -289,37 +279,13 @@ bool SensorManager::sample(SensorSample& out) {
         m_npad_last_tick = now;
     }
 
-    // 3. Pick the source (see sensor.hpp): npad preferred, SevenSixAxis as
-    //    fallback, each held through short gaps.
-    const bool npad_alive = within(m_npad_last_tick, npad_hold);
-    const bool npad_settled = npad_alive && armTicksToNs(now - m_npad_streak_tick) >= NPAD_SETTLE_NS;
-    switch (m_current) {
-        case SensorSource::Npad:
-            if (!npad_alive)
-                m_current = seven_alive ? SensorSource::SevenSixAxis : SensorSource::None;
-            break;
-        case SensorSource::SevenSixAxis:
-            if (npad_settled || (npad_alive && !seven_alive))
-                m_current = SensorSource::Npad;
-            else if (!seven_alive)
-                m_current = SensorSource::None;
-            break;
-        default:
-            // Nothing to stay with: take whatever streams, npad first.
-            m_current = npad_alive ? SensorSource::Npad
-                      : seven_alive ? SensorSource::SevenSixAxis : SensorSource::None;
-            break;
-    }
-
-    if (m_current == SensorSource::Npad && best >= 0) {
+    // Fallback: If SevenSixAxis wasn't available, use best connected Npad controller.
+    if (best >= 0) {
         const HidSixAxisSensorState& st = states[best];
         out.accel = Vec3f(st.acceleration.x, st.acceleration.y, st.acceleration.z);
         out.gyro = Vec3f(st.angular_velocity.x, st.angular_velocity.y, st.angular_velocity.z);
         out.source = SensorSource::Npad;
-        return true;
-    }
-    if (m_current == SensorSource::SevenSixAxis && seven_fresh) {
-        out = seven;
+        m_current = SensorSource::Npad;
         return true;
     }
     return false;

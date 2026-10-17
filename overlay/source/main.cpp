@@ -180,9 +180,8 @@ namespace {
         // A gap longer than SensorFreshNs starts a new run.
         if (g_realSinceTick == 0 || g_lastSampleTick == 0 || armTicksToNs(now - g_lastSampleTick) >= SensorFreshNs)
             g_realSinceTick = now;
-        // dt since the previous fresh sample, so gyro integration covers
-        // frames without one (clamped inside update()).
-        const float dt = g_lastSampleTick != 0 ? (float)armTicksToNs(now - g_lastSampleTick) / 1e9f : 0.0f;
+        const float raw_dt = g_lastSampleTick != 0 ? (float)armTicksToNs(now - g_lastSampleTick) / 1e9f : 0.0f;
+        const float dt = (raw_dt > 0.005f && raw_dt < 0.05f) ? raw_dt : (1.0f / 60.0f);
         g_orientation = g_filter.update(smp.accel, smp.gyro, dt, g_config);
         g_lastSampleTick = now;
     }
@@ -251,23 +250,8 @@ namespace {
         }
     }
 
-    // (Re)starts the sensor for the "Console Motion Sensor" setting.
-    void apply_console_sensor() {
-        const Result rc = sensor_start(g_config.general.console_sensor);
-        if (R_FAILED(rc))
-            show_notice(ColorError, is_tr() ? "Konsol sensörü başlatılamadı: %04u-%04u" : "Console sensor failed: %04u-%04u",
-                        (unsigned)(2000 + R_MODULE(rc)), (unsigned)R_DESCRIPTION(rc));
-    }
-
     // Lets Ultrahand assign a key combo to the HUD mode ("Launch modes" in
-    // the overlay's settings), as Status Monitor does. The label is the
-    // menu's launch item in the current language (Ultrahand keeps mode
-    // combos by position, so relabelling keeps them). Nothing depends on
-    // matching it: the --lastSelectedItem <label> that libtesla adds on a
-    // combo return is ignored, because the launch item is the menu's first
-    // item and so gets the initial focus anyway. Written only when missing
-    // or different, so the SD card is not touched on every launch.
-    // overlays.ini itself is Ultrahand's: left alone when it does not exist.
+    // the overlay's settings), as Status Monitor does.
     void register_launch_modes() {
         if (!ult::isFile(ult::OVERLAYS_INI_FILEPATH))
             return;
@@ -277,17 +261,6 @@ namespace {
             ult::setIniFileValue(ult::OVERLAYS_INI_FILEPATH, g_selfName, "mode_args", args);
         if (ult::parseValueFromIniSection(ult::OVERLAYS_INI_FILEPATH, g_selfName, "mode_labels") != labels)
             ult::setIniFileValue(ult::OVERLAYS_INI_FILEPATH, g_selfName, "mode_labels", labels);
-    }
-
-    // Static orange note lines under a list item.
-    constexpr s32 NoteLineStep = 20;
-
-    void add_note(tsl::elm::List* list, const char* const* lines, int count) {
-        list->addItem(new tsl::elm::CustomDrawer([lines, count](tsl::gfx::Renderer *renderer, s32 x, s32 y, s32 w, s32 h) {
-            const tsl::Color color = make_color(255, 170, 50);
-            for (int i = 0; i < count; ++i)
-                renderer->drawString(lines[i], false, x + 19, y + 20 + i * NoteLineStep, 15, color);
-        }), (u16)(count * NoteLineStep + 12));
     }
 
     // HUD mode: the menu combo, pressed and not yet released.
@@ -500,12 +473,10 @@ public:
             add_sub("YouTube: @SertAyyy", make_color(255, 90, 100));
             add_sub("TikTok: @sertayintardis", make_color(80, 240, 220));
 
-            add_header("BU SÜRÜM HAKKINDA", make_color(255, 210, 60));
-            add_body("Bu sürüm, SertAy'ın orijinal Kinestop");
-            add_body("projesinin değiştirilmiş (4 MB overlay");
-            add_body("belleği için optimize edilmiş) bir");
-            add_body("sürümüdür. Orijinal proje:");
-            add_sub("github.com/sertay1/Kinestop", make_color(80, 200, 255));
+            add_header("ÖZEL TEŞEKKÜR", make_color(255, 210, 60));
+            add_body("4 MB Ultrahand bellek optimizasyonu");
+            add_body("ve Status Monitor ekran mimarisi");
+            add_body("katkıları için RandomTask-1'e teşekkürler!");
 
             add_header("KİNESTOP NEDİR?", make_color(255, 170, 50));
             add_body("Kinestop, araçta (araba, otobüs, tren vb.)");
@@ -521,14 +492,6 @@ public:
             add_body("tüm tuşlar oyunda kalır. Ultrahand");
             add_body("kombinasyonu noktaları durdurur ve bu");
             add_body("menüyü yeniden açar.");
-
-            add_sub("Konsol Hareket Sensörü:", make_color(255, 210, 60));
-            add_body("Konsolun kendi hareket sensörünü de");
-            add_body("okur; böylece noktalar HOME menüsünde");
-            add_body("ve RetroArch gibi homebrew'larda da");
-            add_body("hareket eder (orada kumanda hareket");
-            add_body("verisi durur). 512 KB overlay belleği");
-            add_body("kullanır; varsayılan olarak kapalıdır.");
 
             add_sub("Desen (Yerleşim):", make_color(255, 210, 60));
             add_body("Noktaların ekrandaki yerleşim şablonu:");
@@ -622,11 +585,10 @@ public:
             add_sub("YouTube: @SertAyyy", make_color(255, 90, 100));
             add_sub("TikTok: @sertayintardis", make_color(80, 240, 220));
 
-            add_header("ABOUT THIS BUILD", make_color(255, 210, 60));
-            add_body("This is a modified version (optimized");
-            add_body("for 4 MB of overlay memory) of the");
-            add_body("original Kinestop by SertAy:");
-            add_sub("github.com/sertay1/Kinestop", make_color(80, 200, 255));
+            add_header("SPECIAL THANKS", make_color(255, 210, 60));
+            add_body("Special thanks to RandomTask-1 for");
+            add_body("the 4 MB Ultrahand memory optimization");
+            add_body("and display strategy contributions!");
 
             add_header("WHAT IS KINESTOP?", make_color(255, 170, 50));
             add_body("Kinestop helps eliminate vehicle motion");
@@ -642,14 +604,6 @@ public:
             add_body("the game keeps every button. The");
             add_body("Ultrahand combo stops them and opens");
             add_body("this menu again.");
-
-            add_sub("Console Motion Sensor:", make_color(255, 210, 60));
-            add_body("Also reads the console's own motion");
-            add_body("sensor, so the dots move at the HOME");
-            add_body("menu and in homebrew like RetroArch");
-            add_body("too (controller motion data stops");
-            add_body("there). Uses 512 KB of overlay memory;");
-            add_body("off by default.");
 
             add_sub("Pattern (Placement):", make_color(255, 210, 60));
             add_body("Choose where dots appear on screen:");
@@ -832,39 +786,6 @@ public:
         });
         list->addItem(launchDots);
 
-        static constexpr const char* launchEn[] = {
-            "Shows the dots over the game. The",
-            "Ultrahand combo brings you back here.",
-        };
-        static constexpr const char* launchTr[] = {
-            "Noktaları oyunun üzerinde gösterir.",
-            "Ultrahand kombinasyonu buraya",
-            "geri getirir.",
-        };
-        if (isTr) add_note(list, launchTr, 3);
-        else      add_note(list, launchEn, 2);
-
-        auto *toggleConsoleSensor = new tsl::elm::ToggleListItem(isTr ? "Konsol Hareket Sensörü" : "Console Motion Sensor",
-                                                                 g_config.general.console_sensor);
-        toggleConsoleSensor->setStateChangedListener([](bool newState) {
-            g_config.general.console_sensor = newState;
-            save_config_now();
-            apply_console_sensor();
-        });
-        list->addItem(toggleConsoleSensor);
-
-        static constexpr const char* sensorEn[] = {
-            "Lets dots move at the HOME menu and",
-            "in homebrew like RetroArch (512 KB).",
-        };
-        static constexpr const char* sensorTr[] = {
-            "Noktalar HOME menüsünde ve RetroArch",
-            "gibi homebrew'larda da hareket eder",
-            "(512 KB kullanır).",
-        };
-        if (isTr) add_note(list, sensorTr, 3);
-        else      add_note(list, sensorEn, 2);
-
         // ------------------ PATTERN & DENSITY ------------------
         list->addItem(new tsl::elm::CategoryHeader(isTr ? "Yerleşim ve Yoğunluk" : "Placement & Density"));
 
@@ -1031,16 +952,6 @@ public:
         });
         list->addItem(toggleAutoCalib);
 
-        static constexpr const char* autoCalibEn[] = {
-            "Motion Dots uses your holding angle",
-            "at start as the zero.",
-        };
-        static constexpr const char* autoCalibTr[] = {
-            "Hareket Noktaları başlarken tutuş",
-            "açınızı sıfır noktası yapar.",
-        };
-        add_note(list, isTr ? autoCalibTr : autoCalibEn, 2);
-
         // Calibration Handheld Zero Button: the current filtered orientation,
         // sampled by this panel, becomes the zero.
         auto *calibCurrentBtn = new tsl::elm::ListItem(
@@ -1108,11 +1019,8 @@ public:
         auto *resetDefaultsBtn = new tsl::elm::ListItem(isTr ? "Ayarları Sıfırla" : "Reset Settings");
         resetDefaultsBtn->setClickListener([](u64 keys) {
             if (keys & HidNpadButton_A) {
-                const bool consoleSensor = g_config.general.console_sensor;
                 g_config.set_defaults();
                 save_config_now();
-                if (consoleSensor != g_config.general.console_sensor)
-                    apply_console_sensor();
                 g_needGuiReload = true;
                 return true;
             }

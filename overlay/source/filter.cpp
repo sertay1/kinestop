@@ -40,11 +40,8 @@ Orientation ComplementaryFilter::update(const Vec3f& accel, const Vec3f& gyro, f
         m_orientation.yaw_deg = 0.0f;
         m_initialized = true;
     } else {
-        // Smoothing is the weight per 1/60 s (the original overlay updated
-        // once per 60 Hz frame); scaled to the real gap between samples so
-        // the 10 Hz console sensor catches up as fast as the controllers.
-        constexpr float REF_DT = 1.0f / 60.0f;
-        float alpha = std::pow(clamp(cfg.filter.alpha, 0.0f, 0.999f), dt / REF_DT);
+        // Stable complementary filter alpha for smooth motion
+        float alpha = clamp(cfg.filter.alpha, 0.0f, 0.999f);
 
         // Gyro integration (gyro.x = pitch rate, gyro.z = roll rate in deg/s)
         float pitch_gyro = m_orientation.pitch_deg + gyro.x * dt;

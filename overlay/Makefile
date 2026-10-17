@@ -16,8 +16,8 @@ TOPDIR ?= $(CURDIR)
 include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE       := Kinestop
-APP_AUTHOR      := Kinestop
-APP_VERSION     := 2.0.0-test.9
+APP_AUTHOR      := SertAy
+APP_VERSION     := 2.0.0
 
 TARGET          := kinestop
 BUILD           := build
@@ -99,8 +99,8 @@ all: $(OUTPUT).ovl
 
 $(OUTPUT).ovl: $(OUTPUT).elf $(OUTPUT).nacp
 	@elf2nro $< $@ $(NROFLAGS)
-	@echo "built ... $(notdir $@)"
 	@printf 'ULTR' >> $@
+	@echo "built ... $(notdir $@)"
 
 # Regenerated when the Makefile (APP_VERSION) changes; kinestop.nacp is committed.
 $(OUTPUT).nacp: $(TOPDIR)/Makefile

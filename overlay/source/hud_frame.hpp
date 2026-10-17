@@ -88,11 +88,9 @@ inline void build_dot_frame(const Config& cfg, uint32_t fb_width, DotFrame& fram
     frame.style.border = {theme.br, theme.bg, theme.bb, (uint8_t)border_alpha};
 }
 
-// The shared offset (logical px) snapped to quarter framebuffer pixels.
-inline dots::Point snap_offset(dots::Point offset, float scale) {
-    namespace fs = frame_scale;
-    return {fs::dequantize_offset(fs::quantize_offset(offset.x, scale), scale),
-            fs::dequantize_offset(fs::quantize_offset(offset.y, scale), scale)};
+// The shared offset (logical px) directly passed for smooth subpixel interpolation.
+inline dots::Point snap_offset(dots::Point offset, float /*scale*/) {
+    return offset;
 }
 
 // Centre of dot i in framebuffer px for a snapped offset. Not free floating,
