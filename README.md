@@ -1,4 +1,4 @@
-<h1 align="center">Kinestop v2.0.0</h1>
+<h1 align="center">Kinestop</h1>
 
 <div align="center">
 <img src="assets/logo.png" alt="Kinestop Logo" width="200">
