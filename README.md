@@ -3,6 +3,11 @@
 <div align="center">
 <img src="assets/logo.png" alt="Kinestop Logo" width="200">
 
+<br><br>
+
+<a href="#en-setup-and-usage-guide" style="text-decoration:none;"><img src="https://img.shields.io/badge/Language-English-blue?style=for-the-badge" alt="English"></a> &nbsp;&nbsp; <a href="#tr-kurulum-ve-kullanım-rehberi" style="text-decoration:none;"><img src="https://img.shields.io/badge/Dil-Türkçe-red?style=for-the-badge" alt="Türkçe"></a>
+</div>
+
 ---
 
 <p align="center">
@@ -14,9 +19,6 @@
 <img src="assets/kinestop.gif" alt="Kinestop Demo" width="750">
 
 <br><br>
-
-<a href="#en-setup-and-usage-guide" style="text-decoration:none;"><img src="https://img.shields.io/badge/Language-English-blue?style=for-the-badge" alt="English"></a> &nbsp;&nbsp; <a href="#tr-kurulum-ve-kullanım-rehberi" style="text-decoration:none;"><img src="https://img.shields.io/badge/Dil-Türkçe-red?style=for-the-badge" alt="Türkçe"></a>
-</div>
 
 ---
 
